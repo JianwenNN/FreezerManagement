@@ -1,0 +1,35 @@
+Generic single-database configuration for Freezer Management System.
+
+This directory contains the Alembic database migration scripts for the project.
+
+## Usage
+
+To apply the latest migrations:
+```
+alembic upgrade head
+```
+
+To create a new migration:
+```
+alembic revision -m "description of changes"
+```
+
+To create a migration based on model changes:
+```
+alembic revision --autogenerate -m "description of changes"
+```
+
+To revert the most recent migration:
+```
+alembic downgrade -1
+```
+
+To get current migration info:
+```
+alembic current
+```
+
+To list all migrations:
+```
+alembic history
+```
