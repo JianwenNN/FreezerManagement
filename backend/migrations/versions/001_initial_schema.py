@@ -330,6 +330,196 @@ def upgrade():
     (2, 2, 7);  -- Large drawer: 7 small (6x8) containers
     """)
 
+    # Add this to your upgrade() function
+    op.execute("""
+    CREATE OR REPLACE FUNCTION allocate_containers_in_proximity(
+        p_container_type_id INTEGER,
+        p_container_count INTEGER
+    ) RETURNS TABLE (
+        drawer_id INTEGER,
+        drawer_coordinate TEXT,
+        container_count INTEGER,
+        remaining_count INTEGER
+    ) AS $$
+    DECLARE
+        total_to_allocate INTEGER := p_container_count;
+        remaining INTEGER := p_container_count;
+        current_rack_id INTEGER := NULL;
+        current_layer_id INTEGER := NULL;
+        current_freezer_id INTEGER := NULL;
+        container_fit INTEGER;
+        max_capacity INTEGER;
+        current_count INTEGER;
+    BEGIN
+        -- First pass: Try to fill drawers in the same rack
+        WHILE remaining > 0 LOOP
+            IF current_rack_id IS NULL THEN
+                -- Find a rack with maximum available space
+                WITH drawer_capacity_info AS (
+                    SELECT 
+                        d.id AS drawer_id,
+                        d.drawer_type_id,
+                        d.rack_id,
+                        r.layer_id,
+                        l.freezer_id,
+                        dc.max_capacity,
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM container c
+                            WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                        ), 0) AS current_count,
+                        (dc.max_capacity - COALESCE((
+                            SELECT COUNT(*)
+                            FROM container c
+                            WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                        ), 0)) AS available_space
+                    FROM drawer d
+                    JOIN rack r ON d.rack_id = r.id
+                    JOIN layer l ON r.layer_id = l.id
+                    JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
+                    WHERE (dc.max_capacity - COALESCE((
+                        SELECT COUNT(*)
+                        FROM container c
+                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                    ), 0)) > 0
+                ),
+                rack_availability AS (
+                    SELECT 
+                        rack_id,
+                        layer_id,
+                        freezer_id,
+                        SUM(available_space) AS total_space
+                    FROM drawer_capacity_info
+                    GROUP BY rack_id, layer_id, freezer_id
+                    ORDER BY total_space DESC
+                    LIMIT 1
+                )
+                SELECT rack_id, layer_id, freezer_id INTO current_rack_id, current_layer_id, current_freezer_id
+                FROM rack_availability;
+                
+                -- If no rack found, exit
+                IF current_rack_id IS NULL THEN
+                    EXIT;
+                END IF;
+            END IF;
+            
+            -- Find best drawer in current rack
+            WITH drawer_info AS (
+                SELECT 
+                    d.id AS drawer_id,
+                    dc.max_capacity,
+                    COALESCE((
+                        SELECT COUNT(*)
+                        FROM container c
+                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                    ), 0) AS current_count,
+                    (dc.max_capacity - COALESCE((
+                        SELECT COUNT(*)
+                        FROM container c
+                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                    ), 0)) AS available_space
+                FROM drawer d
+                JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
+                WHERE d.rack_id = current_rack_id
+                AND (dc.max_capacity - COALESCE((
+                    SELECT COUNT(*)
+                    FROM container c
+                    WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
+                ), 0)) > 0
+                ORDER BY available_space DESC
+                LIMIT 1
+            )
+            SELECT 
+                drawer_id, max_capacity, current_count, available_space 
+            INTO 
+                drawer_id, max_capacity, current_count, container_fit
+            FROM drawer_info;
+            
+            -- If no drawer found in this rack, move to another rack in same layer
+            IF drawer_id IS NULL THEN
+                current_rack_id := NULL;
+                
+                WITH layer_racks AS (
+                    SELECT id 
+                    FROM rack 
+                    WHERE layer_id = current_layer_id 
+                    AND id != current_rack_id
+                    ORDER BY rack_number
+                    LIMIT 1
+                )
+                SELECT id INTO current_rack_id FROM layer_racks;
+                
+                -- If no other rack in this layer, try another layer in same freezer
+                IF current_rack_id IS NULL THEN
+                    current_layer_id := NULL;
+                    
+                    WITH freezer_layers AS (
+                        SELECT id 
+                        FROM layer 
+                        WHERE freezer_id = current_freezer_id 
+                        AND id != current_layer_id
+                        ORDER BY layer_number
+                        LIMIT 1
+                    )
+                    SELECT id INTO current_layer_id FROM freezer_layers;
+                    
+                    -- If no other layer in this freezer, try another freezer
+                    IF current_layer_id IS NULL THEN
+                        current_freezer_id := NULL;
+                        
+                        WITH another_freezer AS (
+                            SELECT id 
+                            FROM freezer 
+                            WHERE id != current_freezer_id
+                            LIMIT 1
+                        )
+                        SELECT id INTO current_freezer_id FROM another_freezer;
+                        
+                        -- If no other freezer, we're out of options
+                        IF current_freezer_id IS NULL THEN
+                            EXIT;
+                        END IF;
+                        
+                        -- Get first layer in new freezer
+                        SELECT id INTO current_layer_id 
+                        FROM layer 
+                        WHERE freezer_id = current_freezer_id 
+                        ORDER BY layer_number 
+                        LIMIT 1;
+                    END IF;
+                    
+                    -- Get first rack in new layer
+                    SELECT id INTO current_rack_id 
+                    FROM rack 
+                    WHERE layer_id = current_layer_id 
+                    ORDER BY rack_number 
+                    LIMIT 1;
+                END IF;
+                
+                CONTINUE;
+            END IF;
+            
+            -- Determine how many containers we can fit in this drawer
+            container_count := LEAST(container_fit, remaining);
+            remaining := remaining - container_count;
+            
+            -- Get drawer coordinate
+            SELECT drawer_coordinate INTO drawer_coordinate
+            FROM drawer_coordinates
+            WHERE drawer_coordinates.drawer_id = drawer_id;
+            
+            -- Return this drawer allocation
+            RETURN NEXT;
+            
+            -- If we've allocated all containers, exit
+            IF remaining <= 0 THEN
+                EXIT;
+            END IF;
+        END LOOP;
+    END;
+    $$ LANGUAGE plpgsql;
+    """)
+
 
 def downgrade():
     # Drop triggers
@@ -343,6 +533,7 @@ def downgrade():
     
     # Drop views
     op.execute("DROP VIEW IF EXISTS drawer_coordinates")
+    op.execute("DROP FUNCTION IF EXISTS allocate_containers_in_proximity(INTEGER, INTEGER);")
     
     # Drop tables in reverse order (respecting foreign key constraints)
     op.drop_table('glp_preparation_sample')
