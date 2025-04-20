@@ -1,11 +1,8 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field
 
 from .base import Base
-
 
 class ContainerType(Base):
     __tablename__ = "container_type"
@@ -22,7 +19,6 @@ class ContainerType(Base):
     def __repr__(self):
         return f"<ContainerType(id={self.id}, name={self.name}, dimensions={self.dimensions})>"
 
-
 class DrawerType(Base):
     __tablename__ = "drawer_type"
     
@@ -36,7 +32,6 @@ class DrawerType(Base):
     
     def __repr__(self):
         return f"<DrawerType(id={self.id}, name={self.name})>"
-
 
 class DrawerCapacity(Base):
     __tablename__ = "drawer_capacity"
@@ -57,7 +52,6 @@ class DrawerCapacity(Base):
     def __repr__(self):
         return f"<DrawerCapacity(drawer_type_id={self.drawer_type_id}, container_type_id={self.container_type_id}, max_capacity={self.max_capacity})>"
 
-
 class Container(Base):
     __tablename__ = "container"
     
@@ -77,21 +71,3 @@ class Container(Base):
     
     def __repr__(self):
         return f"<Container(id={self.id}, container_id={self.container_id}, drawer_id={self.drawer_id})>"
-    
-class ContainerAllocationRequest(BaseModel):
-    """Request to allocate space for multiple containers."""
-    container_type_id: int
-    number_of_containers: int = Field(..., gt=0)
-    sample_type: Literal["study_sample", "nonglp_preparation", "glp_preparation"]
-    project_id: Optional[str] = None
-
-
-class DrawerAllocation(BaseModel):
-    """Information about drawer allocation for containers."""
-    drawer_id: int
-    freezer_asset_id: str
-    layer_number: int
-    rack_number: int
-    drawer_number: int
-    drawer_coordinate: str
-    container_count: int
