@@ -351,135 +351,135 @@ def upgrade():
         max_capacity INTEGER;
         current_count INTEGER;
     BEGIN
+        -- Helper function to calculate available space
+        CREATE OR REPLACE FUNCTION available_space_in_drawer(drawer_id INTEGER, container_type_id INTEGER)
+        RETURNS INTEGER AS $$
+        DECLARE
+            max_capacity INTEGER;
+            current_total INTEGER;
+            current_type_count INTEGER;
+            different_type_count INTEGER;
+            drawer_type INTEGER;
+        BEGIN
+            -- Get drawer type and max capacity
+            SELECT d.drawer_type_id, dc.max_capacity
+            INTO drawer_type, max_capacity
+            FROM drawer d
+            JOIN drawer_capacity dc 
+            ON d.drawer_type_id = dc.drawer_type_id
+            AND dc.container_type_id = container_type_id
+            WHERE d.id = drawer_id;
+
+            -- Count all containers in the drawer
+            SELECT COUNT(*) INTO current_total
+            FROM container
+            WHERE drawer_id = drawer_id;
+
+            IF current_total = 0 THEN
+                -- Drawer is completely empty
+                RETURN max_capacity;
+            END IF;
+
+            -- Check if drawer has only same container type
+            SELECT COUNT(*) INTO current_type_count
+            FROM container
+            WHERE drawer_id = drawer_id AND container_type_id = container_type_id;
+
+            SELECT COUNT(*) INTO different_type_count
+            FROM container
+            WHERE drawer_id = drawer_id AND container_type_id != container_type_id;
+
+            IF different_type_count > 0 THEN
+                -- Drawer has other container types → incompatible
+                RETURN 0;
+            ELSE
+                RETURN max_capacity - current_type_count;
+            END IF;
+        END;
+        $$ LANGUAGE plpgsql;
+
+
         -- First pass: Try to fill drawers in the same rack
         WHILE remaining > 0 LOOP
             IF current_rack_id IS NULL THEN
                 -- Find a rack with maximum available space
-                WITH drawer_capacity_info AS (
-                    SELECT 
-                        d.id AS drawer_id,
-                        d.drawer_type_id,
-                        d.rack_id,
-                        r.layer_id,
-                        l.freezer_id,
-                        dc.max_capacity,
-                        COALESCE((
-                            SELECT COUNT(*)
-                            FROM container c
-                            WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                        ), 0) AS current_count,
-                        (dc.max_capacity - COALESCE((
-                            SELECT COUNT(*)
-                            FROM container c
-                            WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                        ), 0)) AS available_space
+                WITH rack_availability AS (
+                    SELECT rack_id, layer_id, freezer_id, 
+                        SUM(available_space_in_drawer(d.id, p_container_type_id)) AS total_space
                     FROM drawer d
                     JOIN rack r ON d.rack_id = r.id
                     JOIN layer l ON r.layer_id = l.id
-                    JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
-                    WHERE (dc.max_capacity - COALESCE((
-                        SELECT COUNT(*)
-                        FROM container c
-                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                    ), 0)) > 0
-                ),
-                rack_availability AS (
-                    SELECT 
-                        rack_id,
-                        layer_id,
-                        freezer_id,
-                        SUM(available_space) AS total_space
-                    FROM drawer_capacity_info
+                    WHERE available_space_in_drawer(d.id, p_container_type_id) > 0
                     GROUP BY rack_id, layer_id, freezer_id
                     ORDER BY total_space DESC
                     LIMIT 1
                 )
                 SELECT rack_id, layer_id, freezer_id INTO current_rack_id, current_layer_id, current_freezer_id
                 FROM rack_availability;
-                
+
                 -- If no rack found, exit
                 IF current_rack_id IS NULL THEN
+                    RAISE NOTICE 'No available space for containers';
                     EXIT;
                 END IF;
             END IF;
-            
+
             -- Find best drawer in current rack
             WITH drawer_info AS (
-                SELECT 
-                    d.id AS drawer_id,
-                    dc.max_capacity,
-                    COALESCE((
-                        SELECT COUNT(*)
-                        FROM container c
-                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                    ), 0) AS current_count,
-                    (dc.max_capacity - COALESCE((
-                        SELECT COUNT(*)
-                        FROM container c
-                        WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                    ), 0)) AS available_space
+                SELECT d.id AS drawer_id,
+                    available_space_in_drawer(d.id, p_container_type_id) AS available_space
                 FROM drawer d
-                JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
                 WHERE d.rack_id = current_rack_id
-                AND (dc.max_capacity - COALESCE((
-                    SELECT COUNT(*)
-                    FROM container c
-                    WHERE c.drawer_id = d.id AND c.container_type_id = p_container_type_id
-                ), 0)) > 0
+                AND available_space_in_drawer(d.id, p_container_type_id) > 0
                 ORDER BY available_space DESC
                 LIMIT 1
             )
-            SELECT 
-                drawer_id, max_capacity, current_count, available_space 
-            INTO 
-                drawer_id, max_capacity, current_count, container_fit
+            SELECT drawer_id, available_space INTO drawer_id, container_fit
             FROM drawer_info;
-            
+
             -- If no drawer found in this rack, move to another rack in same layer
             IF drawer_id IS NULL THEN
                 current_rack_id := NULL;
-                
+                -- Find another rack in the same layer
                 WITH layer_racks AS (
-                    SELECT id 
-                    FROM rack 
+                    SELECT id FROM rack 
                     WHERE layer_id = current_layer_id 
                     AND id != current_rack_id
                     ORDER BY rack_number
                     LIMIT 1
                 )
                 SELECT id INTO current_rack_id FROM layer_racks;
-                
+
                 -- If no other rack in this layer, try another layer in same freezer
                 IF current_rack_id IS NULL THEN
                     current_layer_id := NULL;
-                    
+                    -- Find another layer in the same freezer
                     WITH freezer_layers AS (
-                        SELECT id 
-                        FROM layer 
+                        SELECT id FROM layer 
                         WHERE freezer_id = current_freezer_id 
                         AND id != current_layer_id
                         ORDER BY layer_number
                         LIMIT 1
                     )
                     SELECT id INTO current_layer_id FROM freezer_layers;
-                    
+
                     -- If no other layer in this freezer, try another freezer
                     IF current_layer_id IS NULL THEN
                         current_freezer_id := NULL;
-                        
+                        -- Find another freezer
                         WITH another_freezer AS (
-                            SELECT id 
-                            FROM freezer 
+                            SELECT id FROM freezer 
                             WHERE id != current_freezer_id
                             LIMIT 1
                         )
                         SELECT id INTO current_freezer_id FROM another_freezer;
-                        
-                        -- If no other freezer, we're out of options
+
+                        -- If no other freezer, exit
                         IF current_freezer_id IS NULL THEN
+                            RAISE NOTICE 'No more available storage for containers';
                             EXIT;
                         END IF;
-                        
+
                         -- Get first layer in new freezer
                         SELECT id INTO current_layer_id 
                         FROM layer 
@@ -487,7 +487,7 @@ def upgrade():
                         ORDER BY layer_number 
                         LIMIT 1;
                     END IF;
-                    
+
                     -- Get first rack in new layer
                     SELECT id INTO current_rack_id 
                     FROM rack 
@@ -495,29 +495,34 @@ def upgrade():
                     ORDER BY rack_number 
                     LIMIT 1;
                 END IF;
-                
                 CONTINUE;
             END IF;
-            
-            -- Determine how many containers we can fit in this drawer
+
+            -- Allocate containers
             container_count := LEAST(container_fit, remaining);
             remaining := remaining - container_count;
-            
-            -- Get drawer coordinate
+
+            -- Get drawer coordinates
             SELECT drawer_coordinate INTO drawer_coordinate
             FROM drawer_coordinates
-            WHERE drawer_coordinates.drawer_id = drawer_id;
-            
-            -- Return this drawer allocation
+            WHERE drawer_id = drawer_id;
+
+            -- Return the allocation for this drawer
             RETURN NEXT;
-            
-            -- If we've allocated all containers, exit
+
+            -- Exit if all containers have been allocated
             IF remaining <= 0 THEN
                 EXIT;
             END IF;
         END LOOP;
+        
+        -- If still remaining containers, raise a notice
+        IF remaining > 0 THEN
+            RAISE NOTICE 'Unable to allocate all containers. Remaining: %', remaining;
+        END IF;
     END;
     $$ LANGUAGE plpgsql;
+
     """)
 
 
