@@ -9,7 +9,7 @@ class ContainerType(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
-    dimensions = Column(String(50), nullable=False)
+    # dimensions = Column(String(50), nullable=False)
     description = Column(Text)
     
     # Relationships
@@ -56,18 +56,25 @@ class Container(Base):
     __tablename__ = "container"
     
     id = Column(Integer, primary_key=True, index=True)
-    container_id = Column(String(100), unique=True, nullable=False)
     drawer_id = Column(Integer, ForeignKey("drawer.id"), nullable=False)
     container_type_id = Column(Integer, ForeignKey("container_type.id"), nullable=False)
+    
+    # Only used for study sample containers
+    container_id = Column(String(100), unique=True, nullable=True)
+
+    # Optional metadata fields, may be shared across containers
+    experiment_id = Column(String(100), nullable=True)
+    study_name = Column(String(100), nullable=True)
+
     position_in_drawer = Column(String(50))
     date_added = Column(DateTime(timezone=True), server_default=func.now())
-    
+
     # Relationships
     drawer = relationship("Drawer", back_populates="containers")
     container_type = relationship("ContainerType", back_populates="containers")
     study_samples = relationship("StudySample", back_populates="container", cascade="all, delete-orphan")
     nonglp_samples = relationship("NonGLPSample", back_populates="container", cascade="all, delete-orphan")
     glp_samples = relationship("GLPSample", back_populates="container", cascade="all, delete-orphan")
-    
+
     def __repr__(self):
         return f"<Container(id={self.id}, container_id={self.container_id}, drawer_id={self.drawer_id})>"
