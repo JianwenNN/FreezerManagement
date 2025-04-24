@@ -10,8 +10,6 @@ class StudySample(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     container_id = Column(Integer, ForeignKey("container.id"), nullable=False)
-    study_name = Column(String(200), nullable=False)
-    project_id = Column(String(100), nullable=False)
     storage_date = Column(DateTime(timezone=True), server_default=func.now())
     
     # Relationships
@@ -27,7 +25,6 @@ class NonGLPSample(Base):
     id = Column(Integer, primary_key=True, index=True)
     container_id = Column(Integer, ForeignKey("container.id"), nullable=False)
     study_name = Column(String(200), nullable=False)
-    project_id = Column(String(100), nullable=False)
     preparation_date = Column(Date, nullable=False)
     storage_date = Column(DateTime(timezone=True), server_default=func.now())
     
@@ -47,7 +44,6 @@ class GLPSample(Base):
     preparation_date = Column(Date, nullable=False)
     type = Column(String(100), nullable=False)
     study_name = Column(String(200), nullable=False)
-    project_id = Column(String(100), nullable=False)
     expiration_date = Column(Date, nullable=False)
     storage_date = Column(DateTime(timezone=True), server_default=func.now())
     

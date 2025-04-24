@@ -64,6 +64,7 @@ class Container(Base):
 
     # Optional metadata fields, may be shared across containers
     experiment_id = Column(String(100), nullable=True)
+    project_name = Column(String(100), nullable=False)
     study_name = Column(String(100), nullable=True)
 
     position_in_drawer = Column(String(50))
