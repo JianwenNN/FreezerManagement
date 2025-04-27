@@ -1,7 +1,6 @@
 from .base import Base
 from .freezer import Freezer, Layer, Rack, Drawer
-from .container import ContainerType, DrawerType, DrawerCapacity, Container
-from .sample import StudySample, NonGLPSample, GLPSample
+from .container import ContainerType, DrawerType, DrawerCapacity, StudySampleContainer, STDQCContainer
 
 __all__ = [
     "Base",
@@ -12,8 +11,6 @@ __all__ = [
     "ContainerType",
     "DrawerType",
     "DrawerCapacity",
-    "Container",
-    "StudySample",
-    "NonGLPSample",
-    "GLPSample",
+    "StudySampleContainer",
+    "STDQCContainer",
 ]

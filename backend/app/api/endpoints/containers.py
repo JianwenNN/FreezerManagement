@@ -17,7 +17,7 @@ def allocate_containers_in_proximity(
     
     query = text("""
         SELECT * FROM allocate_containers_in_proximity(
-            :container_type_id, :container_count
+            :container_type_id, :container_count, :sample_type
         )
     """)
     
@@ -25,7 +25,8 @@ def allocate_containers_in_proximity(
         query,
         {
             "container_type_id": request.container_type_id,
-            "container_count": request.number_of_containers
+            "container_count": request.number_of_containers,
+            "sample_type": request.sample_type
         }
     ).fetchall()
     

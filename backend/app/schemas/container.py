@@ -5,8 +5,7 @@ class ContainerAllocationRequest(BaseModel):
     """Request to allocate space for multiple containers."""
     container_type_id: int
     number_of_containers: int = Field(..., gt=0)
-    sample_type: Literal["study_sample", "nonglp_preparation", "glp_preparation"]
-    project_id: Optional[str] = None
+    sample_type: Literal["study_sample_container", "stdqc_container"]
 
 class DrawerAllocation(BaseModel):
     """Information about drawer allocation for containers."""

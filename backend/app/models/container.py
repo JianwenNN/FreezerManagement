@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, CheckConstraint, UniqueConstraint
+from sqlalchemy import Column, Integer, String, ForeignKey, Text, DateTime, CheckConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -9,15 +9,15 @@ class ContainerType(Base):
     
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
-    # dimensions = Column(String(50), nullable=False)
     description = Column(Text)
     
     # Relationships
-    containers = relationship("Container", back_populates="container_type")
+    study_sample_containers = relationship("StudySampleContainer", back_populates="container_type")
+    stdqc_containers = relationship("STDQCContainer", back_populates="container_type")
     drawer_capacities = relationship("DrawerCapacity", back_populates="container_type")
     
     def __repr__(self):
-        return f"<ContainerType(id={self.id}, name={self.name}, dimensions={self.dimensions})>"
+        return f"<ContainerType(id={self.id}, name={self.name})>"
 
 class DrawerType(Base):
     __tablename__ = "drawer_type"
@@ -44,7 +44,6 @@ class DrawerCapacity(Base):
     drawer_type = relationship("DrawerType", back_populates="drawer_capacities")
     container_type = relationship("ContainerType", back_populates="drawer_capacities")
     
-    # Constraints
     __table_args__ = (
         CheckConstraint("max_capacity > 0", name="check_positive_capacity"),
     )
@@ -52,30 +51,44 @@ class DrawerCapacity(Base):
     def __repr__(self):
         return f"<DrawerCapacity(drawer_type_id={self.drawer_type_id}, container_type_id={self.container_type_id}, max_capacity={self.max_capacity})>"
 
-class Container(Base):
-    __tablename__ = "container"
-    
+class StudySampleContainer(Base):
+    __tablename__ = "study_sample_container"
+
     id = Column(Integer, primary_key=True, index=True)
     drawer_id = Column(Integer, ForeignKey("drawer.id"), nullable=False)
     container_type_id = Column(Integer, ForeignKey("container_type.id"), nullable=False)
-    
-    # Only used for study sample containers
-    container_id = Column(String(100), unique=True, nullable=True)
 
-    # Optional metadata fields, may be shared across containers
-    experiment_id = Column(String(100), nullable=True)
-    project_name = Column(String(100), nullable=False)
-    study_name = Column(String(100), nullable=True)
-
+    container_barcode = Column(String(100), unique=True, nullable=False)
+    study_name = Column(String(100), nullable=False)
     position_in_drawer = Column(String(50))
     date_added = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
-    drawer = relationship("Drawer", back_populates="containers")
-    container_type = relationship("ContainerType", back_populates="containers")
-    study_samples = relationship("StudySample", back_populates="container", cascade="all, delete-orphan")
-    nonglp_samples = relationship("NonGLPSample", back_populates="container", cascade="all, delete-orphan")
-    glp_samples = relationship("GLPSample", back_populates="container", cascade="all, delete-orphan")
+    drawer = relationship("Drawer", back_populates="study_sample_containers")
+    container_type = relationship("ContainerType", back_populates="study_sample_containers")
 
     def __repr__(self):
-        return f"<Container(id={self.id}, container_id={self.container_id}, drawer_id={self.drawer_id})>"
+        return f"<StudySampleContainer(id={self.id}, barcode={self.container_barcode}, study_name={self.study_name})>"
+
+class STDQCContainer(Base):
+    __tablename__ = "stdqc_container"
+
+    id = Column(Integer, primary_key=True, index=True)
+    drawer_id = Column(Integer, ForeignKey("drawer.id"), nullable=False)
+    container_type_id = Column(Integer, ForeignKey("container_type.id"), nullable=False)
+
+    compound_name = Column(String(100), nullable=False)
+    matrix = Column(String(50), nullable=False)
+    anticoagulant = Column(String(50), nullable=False)
+    prep_date = Column(DateTime(timezone=True), nullable=False)
+    source_id = Column(String(100), nullable=True)
+    description = Column(Text, nullable=True)  # Scanned from frontend
+    position_in_drawer = Column(String(50))
+    date_added = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    drawer = relationship("Drawer", back_populates="stdqc_containers")
+    container_type = relationship("ContainerType", back_populates="stdqc_containers")
+
+    def __repr__(self):
+        return f"<STDQCContainer(id={self.id}, compound_name={self.compound_name})>"
