@@ -30,6 +30,8 @@ def allocate_containers_in_proximity(
         }
     ).fetchall()
     
+    # Rest of the function remains the same...
+    
     if not results:
         raise HTTPException(
             status_code=400,

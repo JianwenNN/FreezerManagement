@@ -84,11 +84,15 @@ class Drawer(Base):
     drawer_number = Column(Integer, nullable=False)
     drawer_type_id = Column(Integer, ForeignKey("drawer_type.id"), nullable=False)
     description = Column(Text)
+    # Add these new fields
+    reserved = Column(Boolean, default=False, nullable=False)
+    reserved_reason = Column(String(200), nullable=True)
     
     # Relationships
     rack = relationship("Rack", back_populates="drawers")
     drawer_type = relationship("DrawerType", back_populates="drawers")
-    containers = relationship("Container", back_populates="drawer", cascade="all, delete-orphan")
+    study_sample_containers = relationship("StudySampleContainer", back_populates="drawer")
+    stdqc_containers = relationship("STDQCContainer", back_populates="drawer")
     
     # Constraints
     __table_args__ = (
@@ -97,4 +101,4 @@ class Drawer(Base):
     )
     
     def __repr__(self):
-        return f"<Drawer(id={self.id}, rack_id={self.rack_id}, drawer_number={self.drawer_number})>"
+        return f"<Drawer(id={self.id}, rack_id={self.rack_id}, drawer_number={self.drawer_number}, reserved={self.reserved})>"

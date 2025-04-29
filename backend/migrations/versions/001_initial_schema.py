@@ -98,6 +98,7 @@ def upgrade():
     )
     
     # Create drawer table
+    # Create drawer table
     op.create_table(
         'drawer',
         sa.Column('id', sa.Integer(), nullable=False),
@@ -105,6 +106,8 @@ def upgrade():
         sa.Column('drawer_number', sa.Integer(), nullable=False),
         sa.Column('drawer_type_id', sa.Integer(), nullable=False),
         sa.Column('description', sa.Text(), nullable=True),
+        sa.Column('reserved', sa.Boolean(), nullable=False, server_default='false'),
+        sa.Column('reserved_reason', sa.String(200), nullable=True),
         sa.CheckConstraint('drawer_number > 0', name='check_positive_drawer_number'),
         sa.ForeignKeyConstraint(['drawer_type_id'], ['drawer_type.id'], ),
         sa.ForeignKeyConstraint(['rack_id'], ['rack.id'], ondelete='CASCADE'),
@@ -153,6 +156,7 @@ def upgrade():
     )
     
     # Create drawer coordinates view
+    # Create drawer coordinates view
     op.execute("""
     CREATE OR REPLACE VIEW drawer_coordinates AS
     SELECT 
@@ -161,7 +165,9 @@ def upgrade():
         l.layer_number,
         r.rack_number,
         d.drawer_number,
-        CONCAT(f.asset_id, '-', l.layer_number, '-', r.rack_number, '-', d.drawer_number) AS drawer_coordinate
+        CONCAT(f.asset_id, '-', l.layer_number, '-', r.rack_number, '-', d.drawer_number) AS drawer_coordinate,
+        d.reserved,
+        d.reserved_reason
     FROM 
         drawer d
     JOIN rack r ON d.rack_id = r.id

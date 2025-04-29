@@ -31,7 +31,9 @@ def create_drawer_coordinates_view():
         l.layer_number,
         r.rack_number,
         d.drawer_number,
-        CONCAT(f.asset_id, '-', l.layer_number, '-', r.rack_number, '-', d.drawer_number) AS drawer_coordinate
+        CONCAT(f.asset_id, '-', l.layer_number, '-', r.rack_number, '-', d.drawer_number) AS drawer_coordinate,
+        d.reserved,
+        d.reserved_reason
     FROM 
         drawer d
     JOIN rack r ON d.rack_id = r.id
@@ -148,6 +150,7 @@ def create_allocation_function():
                 FROM drawer d
                 JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
                 LEFT JOIN study_sample_container ssc ON d.id = ssc.drawer_id AND ssc.container_type_id = p_container_type_id
+                WHERE d.reserved = FALSE  -- Exclude reserved drawers
                 GROUP BY d.id, dc.max_capacity
             )
             
@@ -169,6 +172,7 @@ def create_allocation_function():
                     FROM drawer d
                     JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
                     LEFT JOIN study_sample_container ssc ON d.id = ssc.drawer_id AND ssc.container_type_id = p_container_type_id
+                    WHERE d.reserved = FALSE  -- Exclude reserved drawers
                     GROUP BY d.id, dc.max_capacity
                 )
                 SELECT drawer_id INTO drawer_id
@@ -185,6 +189,7 @@ def create_allocation_function():
                     FROM drawer d
                     JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
                     LEFT JOIN stdqc_container sqc ON d.id = sqc.drawer_id AND sqc.container_type_id = p_container_type_id
+                    WHERE d.reserved = FALSE  -- Exclude reserved drawers
                     GROUP BY d.id, dc.max_capacity
                 )
                 SELECT drawer_id INTO drawer_id
