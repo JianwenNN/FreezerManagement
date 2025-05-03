@@ -127,80 +127,257 @@ def create_capacity_check_functions():
 # Function to create sample allocation function
 def create_allocation_function():
     allocation_function_sql = """
-    CREATE OR REPLACE FUNCTION find_drawer_for_containers(
-        p_study_name VARCHAR,
+    CREATE OR REPLACE FUNCTION allocate_containers_in_proximity(
         p_container_type_id INTEGER,
-        p_sample_type VARCHAR
-    ) RETURNS INTEGER AS $$
+        p_container_count INTEGER,
+        p_sample_type VARCHAR,
+        p_freezer_asset_id VARCHAR  -- Added parameter for specific freezer
+    ) RETURNS TABLE (
+        drawer_id INTEGER,
+        drawer_coordinate TEXT,
+        container_count INTEGER,
+        remaining_count INTEGER
+    ) AS $$
     DECLARE
+        total_to_allocate INTEGER := p_container_count;
+        remaining INTEGER := p_container_count;
+        max_capacity INTEGER;
+        single_drawer_id INTEGER;
+        current_rack_id INTEGER := NULL;
+        current_layer_id INTEGER := NULL;
+        container_fit INTEGER;
         drawer_id INTEGER;
+        drawer_coordinate TEXT;
     BEGIN
-        -- Look for drawer with the same study first (for study samples only)
-        IF p_sample_type = 'study_sample_container' THEN
-            WITH study_drawers AS (
-                SELECT DISTINCT drawer_id
-                FROM study_sample_container
-                WHERE study_name = p_study_name
-            ),
-            drawer_counts AS (
+        -- First get the maximum capacity for this container type
+        SELECT max_capacity INTO max_capacity
+        FROM drawer_capacity dc
+        JOIN drawer_type dt ON dc.drawer_type_id = dt.id
+        WHERE dc.container_type_id = p_container_type_id
+        ORDER BY max_capacity DESC
+        LIMIT 1;
+        
+        -- Check if the requested number is within maximum drawer capacity
+        IF p_container_count <= max_capacity THEN
+            -- Try to find the best fitting drawer (smallest capacity that fits all) in the specified freezer
+            WITH drawer_space AS (
                 SELECT 
                     d.id AS drawer_id,
-                    COUNT(ssc.id) AS container_count,
-                    dc.max_capacity
+                    dc.max_capacity,
+                    CASE 
+                        WHEN p_sample_type = 'study_sample_container' THEN 
+                            (SELECT COUNT(*) FROM study_sample_container 
+                            WHERE drawer_id = d.id AND container_type_id = p_container_type_id)
+                        WHEN p_sample_type = 'stdqc_container' THEN 
+                            (SELECT COUNT(*) FROM stdqc_container 
+                            WHERE drawer_id = d.id AND container_type_id = p_container_type_id)
+                        ELSE 0
+                    END AS current_count
                 FROM drawer d
-                JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
-                LEFT JOIN study_sample_container ssc ON d.id = ssc.drawer_id AND ssc.container_type_id = p_container_type_id
-                WHERE d.reserved = FALSE  -- Exclude reserved drawers
-                GROUP BY d.id, dc.max_capacity
+                JOIN rack r ON d.rack_id = r.id
+                JOIN layer l ON r.layer_id = l.id
+                JOIN freezer f ON l.freezer_id = f.id  -- Add this join
+                JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id 
+                                    AND dc.container_type_id = p_container_type_id
+                WHERE d.reserved = FALSE
+                AND f.asset_id = p_freezer_asset_id  -- Use freezer asset_id instead of id
             )
-            
-            SELECT dc.drawer_id INTO drawer_id
-            FROM drawer_counts dc
-            JOIN study_drawers sd ON dc.drawer_id = sd.drawer_id
-            WHERE dc.container_count < dc.max_capacity
-            ORDER BY (dc.max_capacity - dc.container_count) DESC
+            SELECT drawer_id INTO single_drawer_id
+            FROM drawer_space
+            WHERE (max_capacity - current_count) >= p_container_count
+            ORDER BY (max_capacity - current_count - p_container_count) ASC  -- Choose most efficient fit
             LIMIT 1;
-        END IF;
-        
-        IF drawer_id IS NULL THEN
-            IF p_sample_type = 'study_sample_container' THEN
-                WITH drawer_counts AS (
-                    SELECT 
-                        d.id AS drawer_id,
-                        COUNT(ssc.id) AS container_count,
-                        dc.max_capacity
-                    FROM drawer d
-                    JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
-                    LEFT JOIN study_sample_container ssc ON d.id = ssc.drawer_id AND ssc.container_type_id = p_container_type_id
-                    WHERE d.reserved = FALSE  -- Exclude reserved drawers
-                    GROUP BY d.id, dc.max_capacity
-                )
-                SELECT drawer_id INTO drawer_id
-                FROM drawer_counts
-                WHERE container_count < max_capacity
-                ORDER BY (max_capacity - container_count) DESC
-                LIMIT 1;
-            ELSIF p_sample_type = 'stdqc_container' THEN
-                WITH drawer_counts AS (
-                    SELECT 
-                        d.id AS drawer_id,
-                        COUNT(sqc.id) AS container_count,
-                        dc.max_capacity
-                    FROM drawer d
-                    JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id AND dc.container_type_id = p_container_type_id
-                    LEFT JOIN stdqc_container sqc ON d.id = sqc.drawer_id AND sqc.container_type_id = p_container_type_id
-                    WHERE d.reserved = FALSE  -- Exclude reserved drawers
-                    GROUP BY d.id, dc.max_capacity
-                )
-                SELECT drawer_id INTO drawer_id
-                FROM drawer_counts
-                WHERE container_count < max_capacity
-                ORDER BY (max_capacity - container_count) DESC
-                LIMIT 1;
+            
+            -- If found a suitable drawer
+            IF single_drawer_id IS NOT NULL THEN
+                -- Get drawer coordinates
+                SELECT drawer_coordinate INTO drawer_coordinate
+                FROM drawer_coordinates
+                WHERE drawer_id = single_drawer_id;
+                
+                -- Return a single allocation record
+                drawer_id := single_drawer_id;
+                container_count := remaining;
+                remaining := 0;
+                RETURN NEXT;
+                RETURN;
             END IF;
         END IF;
         
-        RETURN drawer_id;
+        -- If we got here, we need to split the containers across multiple drawers
+        -- but still stay within the specified freezer
+        
+        -- Helper function to calculate available space based on container type
+        CREATE OR REPLACE FUNCTION available_space_in_drawer(
+            p_drawer_id INTEGER, 
+            p_container_type_id INTEGER,
+            p_sample_type VARCHAR
+        )
+        RETURNS INTEGER AS $$
+        DECLARE
+            max_capacity INTEGER;
+            current_count INTEGER;
+            drawer_type INTEGER;
+            is_reserved BOOLEAN;
+        BEGIN
+            -- Check if drawer is reserved
+            SELECT reserved INTO is_reserved
+            FROM drawer
+            WHERE id = p_drawer_id;
+            
+            IF is_reserved THEN
+                RETURN 0;
+            END IF;
+            
+            -- Get drawer type and max capacity
+            SELECT d.drawer_type_id, dc.max_capacity
+            INTO drawer_type, max_capacity
+            FROM drawer d
+            JOIN drawer_capacity dc 
+            ON d.drawer_type_id = dc.drawer_type_id
+            AND dc.container_type_id = p_container_type_id
+            WHERE d.id = p_drawer_id;
+
+            -- Count containers based on sample type
+            IF p_sample_type = 'study_sample_container' THEN
+                SELECT COUNT(*) INTO current_count
+                FROM study_sample_container
+                WHERE drawer_id = p_drawer_id
+                AND container_type_id = p_container_type_id;
+            ELSIF p_sample_type = 'stdqc_container' THEN
+                SELECT COUNT(*) INTO current_count
+                FROM stdqc_container
+                WHERE drawer_id = p_drawer_id
+                AND container_type_id = p_container_type_id;
+            END IF;
+
+            -- Return available space
+            RETURN max_capacity - current_count;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        -- Allocate across multiple drawers in the specified freezer
+        -- First, try to find a layer with maximum available space
+        WITH layer_availability AS (
+            SELECT l.id AS layer_id, 
+                SUM(available_space_in_drawer(d.id, p_container_type_id, p_sample_type)) AS total_space
+            FROM drawer d
+            JOIN rack r ON d.rack_id = r.id
+            JOIN layer l ON r.layer_id = l.id
+            JOIN freezer f ON l.freezer_id = f.id  -- Add this join
+            WHERE f.asset_id = p_freezer_asset_id  -- Use freezer asset_id instead of id
+            AND available_space_in_drawer(d.id, p_container_type_id, p_sample_type) > 0
+            GROUP BY l.id
+            ORDER BY total_space DESC
+            LIMIT 1
+        )
+        SELECT layer_id INTO current_layer_id
+        FROM layer_availability;
+
+        -- If no layer found, exit (not enough space in the freezer)
+        IF current_layer_id IS NULL THEN
+            RAISE NOTICE 'No available space in the specified freezer';
+            RETURN;
+        END IF;
+
+        -- Now allocate within the chosen layer first, then try other layers in the same freezer
+        WHILE remaining > 0 LOOP
+            IF current_rack_id IS NULL THEN
+                -- Find a rack with maximum available space in the current layer
+                WITH rack_availability AS (
+                    SELECT r.id AS rack_id,
+                        SUM(available_space_in_drawer(d.id, p_container_type_id, p_sample_type)) AS total_space
+                    FROM drawer d
+                    JOIN rack r ON d.rack_id = r.id
+                    WHERE r.layer_id = current_layer_id
+                    AND available_space_in_drawer(d.id, p_container_type_id, p_sample_type) > 0
+                    GROUP BY r.id
+                    ORDER BY total_space DESC
+                    LIMIT 1
+                )
+                SELECT rack_id INTO current_rack_id
+                FROM rack_availability;
+
+                -- If no rack found in this layer, try another layer in the same freezer
+                IF current_rack_id IS NULL THEN
+                    -- Find another layer in the same freezer
+                    WITH freezer_layers AS (
+                        SELECT l.id FROM layer l
+                        JOIN freezer f ON l.freezer_id = f.id  -- Add this join
+                        WHERE f.asset_id = p_freezer_asset_id
+                        AND l.id != current_layer_id
+                        ORDER BY l.layer_number
+                        LIMIT 1
+                    )
+                    SELECT id INTO current_layer_id FROM freezer_layers;
+
+                    -- If no other layer available, exit
+                    IF current_layer_id IS NULL THEN
+                        RAISE NOTICE 'Unable to allocate all containers in the specified freezer';
+                        EXIT;
+                    END IF;
+                    CONTINUE;
+                END IF;
+            END IF;
+
+            -- Find drawer with most available space in current rack
+            WITH drawer_info AS (
+                SELECT d.id AS drawer_id,
+                    available_space_in_drawer(d.id, p_container_type_id, p_sample_type) AS available_space
+                FROM drawer d
+                WHERE d.rack_id = current_rack_id
+                AND available_space_in_drawer(d.id, p_container_type_id, p_sample_type) > 0
+                ORDER BY available_space DESC
+                LIMIT 1
+            )
+            SELECT drawer_id, available_space INTO drawer_id, container_fit
+            FROM drawer_info;
+
+            -- If no drawer found in this rack, move to another rack in same layer
+            IF drawer_id IS NULL THEN
+                current_rack_id := NULL;
+                -- Find another rack in the same layer
+                WITH layer_racks AS (
+                    SELECT id FROM rack 
+                    WHERE layer_id = current_layer_id 
+                    AND id != current_rack_id
+                    ORDER BY rack_number
+                    LIMIT 1
+                )
+                SELECT id INTO current_rack_id FROM layer_racks;
+
+                -- If no other rack in this layer, this will trigger finding another layer in the next iteration
+                IF current_rack_id IS NULL THEN
+                    current_layer_id := NULL;
+                END IF;
+                CONTINUE;
+            END IF;
+
+            -- Allocate containers to this drawer
+            container_count := LEAST(container_fit, remaining);
+            remaining := remaining - container_count;
+
+            -- Get drawer coordinates
+            SELECT drawer_coordinate INTO drawer_coordinate
+            FROM drawer_coordinates
+            WHERE drawer_id = drawer_id;
+
+            -- Return this allocation
+            RETURN NEXT;
+
+            -- Exit if all containers have been allocated
+            IF remaining <= 0 THEN
+                EXIT;
+            END IF;
+        END LOOP;
+        
+        -- Clean up helper function
+        DROP FUNCTION IF EXISTS available_space_in_drawer(INTEGER, INTEGER, VARCHAR);
+        
+        -- If still remaining containers, raise a notice
+        IF remaining > 0 THEN
+            RAISE NOTICE 'Unable to allocate all containers in the specified freezer. Remaining: %', remaining;
+        END IF;
     END;
     $$ LANGUAGE plpgsql;
     """

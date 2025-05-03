@@ -17,7 +17,7 @@ def allocate_containers_in_proximity(
     
     query = text("""
         SELECT * FROM allocate_containers_in_proximity(
-            :container_type_id, :container_count, :sample_type
+            :container_type_id, :container_count, :sample_type, :freezer_asset_id
         )
     """)
     
@@ -26,11 +26,11 @@ def allocate_containers_in_proximity(
         {
             "container_type_id": request.container_type_id,
             "container_count": request.number_of_containers,
-            "sample_type": request.sample_type
+            "sample_type": request.sample_type,
+            "freezer_asset_id": request.freezer_asset_id  # Updated parameter name
         }
     ).fetchall()
     
-    # Rest of the function remains the same...
     
     if not results:
         raise HTTPException(

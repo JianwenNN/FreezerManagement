@@ -6,6 +6,7 @@ class ContainerAllocationRequest(BaseModel):
     container_type_id: int
     number_of_containers: int = Field(..., gt=0)
     sample_type: Literal["study_sample_container", "stdqc_container"]
+    freezer_asset_id: str  # Added field
 
 class DrawerAllocation(BaseModel):
     """Information about drawer allocation for containers."""
