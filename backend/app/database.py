@@ -124,14 +124,66 @@ def create_capacity_check_functions():
     with engine.begin() as conn:
         conn.execute(text(capacity_check_sql))
 
-# Function to create sample allocation function
+def create_available_space_function():
+    helper_function_sql = """
+    CREATE OR REPLACE FUNCTION available_space_in_drawer(
+        p_drawer_id INTEGER, 
+        p_container_type_id INTEGER,
+        p_sample_type VARCHAR
+    )
+    RETURNS INTEGER AS $$
+    DECLARE
+        max_capacity INTEGER;
+        current_count INTEGER;
+        drawer_type INTEGER;
+        is_reserved BOOLEAN;
+    BEGIN
+        -- Check if drawer is reserved
+        SELECT reserved INTO is_reserved
+        FROM drawer
+        WHERE id = p_drawer_id;
+        
+        IF is_reserved THEN
+            RETURN 0;
+        END IF;
+        
+        -- Get drawer type and max capacity
+        SELECT d.drawer_type_id, dc.max_capacity
+        INTO drawer_type, max_capacity
+        FROM drawer d
+        JOIN drawer_capacity dc 
+        ON d.drawer_type_id = dc.drawer_type_id
+        AND dc.container_type_id = p_container_type_id
+        WHERE d.id = p_drawer_id;
+
+        -- Count containers based on sample type
+        IF p_sample_type = 'study_sample_container' THEN
+            SELECT COUNT(*) INTO current_count
+            FROM study_sample_container
+            WHERE drawer_id = p_drawer_id
+            AND container_type_id = p_container_type_id;
+        ELSIF p_sample_type = 'stdqc_container' THEN
+            SELECT COUNT(*) INTO current_count
+            FROM stdqc_container
+            WHERE drawer_id = p_drawer_id
+            AND container_type_id = p_container_type_id;
+        END IF;
+
+        -- Return available space
+        RETURN max_capacity - current_count;
+    END;
+    $$ LANGUAGE plpgsql;
+    """
+    with engine.begin() as conn:
+        conn.execute(text(helper_function_sql))
+
 def create_allocation_function():
     allocation_function_sql = """
     CREATE OR REPLACE FUNCTION allocate_containers_in_proximity(
         p_container_type_id INTEGER,
         p_container_count INTEGER,
         p_sample_type VARCHAR,
-        p_freezer_asset_id VARCHAR  -- Added parameter for specific freezer
+        p_freezer_asset_id VARCHAR
     ) RETURNS TABLE (
         drawer_id INTEGER,
         drawer_coordinate TEXT,
@@ -176,11 +228,11 @@ def create_allocation_function():
                 FROM drawer d
                 JOIN rack r ON d.rack_id = r.id
                 JOIN layer l ON r.layer_id = l.id
-                JOIN freezer f ON l.freezer_id = f.id  -- Add this join
+                JOIN freezer f ON l.freezer_id = f.id
                 JOIN drawer_capacity dc ON d.drawer_type_id = dc.drawer_type_id 
-                                    AND dc.container_type_id = p_container_type_id
+                                      AND dc.container_type_id = p_container_type_id
                 WHERE d.reserved = FALSE
-                AND f.asset_id = p_freezer_asset_id  -- Use freezer asset_id instead of id
+                AND f.asset_id = p_freezer_asset_id
             )
             SELECT drawer_id INTO single_drawer_id
             FROM drawer_space
@@ -207,55 +259,8 @@ def create_allocation_function():
         -- If we got here, we need to split the containers across multiple drawers
         -- but still stay within the specified freezer
         
-        -- Helper function to calculate available space based on container type
-        CREATE OR REPLACE FUNCTION available_space_in_drawer(
-            p_drawer_id INTEGER, 
-            p_container_type_id INTEGER,
-            p_sample_type VARCHAR
-        )
-        RETURNS INTEGER AS $$
-        DECLARE
-            max_capacity INTEGER;
-            current_count INTEGER;
-            drawer_type INTEGER;
-            is_reserved BOOLEAN;
-        BEGIN
-            -- Check if drawer is reserved
-            SELECT reserved INTO is_reserved
-            FROM drawer
-            WHERE id = p_drawer_id;
-            
-            IF is_reserved THEN
-                RETURN 0;
-            END IF;
-            
-            -- Get drawer type and max capacity
-            SELECT d.drawer_type_id, dc.max_capacity
-            INTO drawer_type, max_capacity
-            FROM drawer d
-            JOIN drawer_capacity dc 
-            ON d.drawer_type_id = dc.drawer_type_id
-            AND dc.container_type_id = p_container_type_id
-            WHERE d.id = p_drawer_id;
-
-            -- Count containers based on sample type
-            IF p_sample_type = 'study_sample_container' THEN
-                SELECT COUNT(*) INTO current_count
-                FROM study_sample_container
-                WHERE drawer_id = p_drawer_id
-                AND container_type_id = p_container_type_id;
-            ELSIF p_sample_type = 'stdqc_container' THEN
-                SELECT COUNT(*) INTO current_count
-                FROM stdqc_container
-                WHERE drawer_id = p_drawer_id
-                AND container_type_id = p_container_type_id;
-            END IF;
-
-            -- Return available space
-            RETURN max_capacity - current_count;
-        END;
-        $$ LANGUAGE plpgsql;
-
+        -- NOTE: We no longer define the helper function here, we just use it
+        
         -- Allocate across multiple drawers in the specified freezer
         -- First, try to find a layer with maximum available space
         WITH layer_availability AS (
@@ -264,8 +269,8 @@ def create_allocation_function():
             FROM drawer d
             JOIN rack r ON d.rack_id = r.id
             JOIN layer l ON r.layer_id = l.id
-            JOIN freezer f ON l.freezer_id = f.id  -- Add this join
-            WHERE f.asset_id = p_freezer_asset_id  -- Use freezer asset_id instead of id
+            JOIN freezer f ON l.freezer_id = f.id
+            WHERE f.asset_id = p_freezer_asset_id
             AND available_space_in_drawer(d.id, p_container_type_id, p_sample_type) > 0
             GROUP BY l.id
             ORDER BY total_space DESC
@@ -303,7 +308,7 @@ def create_allocation_function():
                     -- Find another layer in the same freezer
                     WITH freezer_layers AS (
                         SELECT l.id FROM layer l
-                        JOIN freezer f ON l.freezer_id = f.id  -- Add this join
+                        JOIN freezer f ON l.freezer_id = f.id
                         WHERE f.asset_id = p_freezer_asset_id
                         AND l.id != current_layer_id
                         ORDER BY l.layer_number
@@ -371,8 +376,7 @@ def create_allocation_function():
             END IF;
         END LOOP;
         
-        -- Clean up helper function
-        DROP FUNCTION IF EXISTS available_space_in_drawer(INTEGER, INTEGER, VARCHAR);
+        -- NOTE: We removed the DROP FUNCTION line since the helper function is now permanent
         
         -- If still remaining containers, raise a notice
         IF remaining > 0 THEN
@@ -388,4 +392,5 @@ def create_allocation_function():
 def init_db_functions():
     create_drawer_coordinates_view()
     create_capacity_check_functions()
+    create_available_space_function()
     create_allocation_function()
