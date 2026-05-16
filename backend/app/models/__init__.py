@@ -1,16 +1,16 @@
 from .base import Base
 from .freezer import Freezer, Layer, Rack, Drawer
-from .container import ContainerType, DrawerType, DrawerCapacity, StudySampleContainer, STDQCContainer
+from .container import StudySampleContainer, STDQCContainer, DrawerReservation
 
 __all__ = [
     "Base",
+    # Freezer structure
     "Freezer",
     "Layer",
     "Rack",
     "Drawer",
-    "ContainerType",
-    "DrawerType",
-    "DrawerCapacity",
+    # Containers
     "StudySampleContainer",
     "STDQCContainer",
+    "DrawerReservation",
 ]

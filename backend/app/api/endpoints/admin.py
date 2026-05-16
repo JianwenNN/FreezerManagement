@@ -2,18 +2,18 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import List, Optional
+from pydantic import BaseModel
 
 from app.database import get_db
-from app import schemas
 
 router = APIRouter()
 
-class DrawerReservationRequest:
+class DrawerReservationRequest(BaseModel):
     drawer_id: int
     reserved: bool
     reserved_reason: Optional[str] = None
 
-class DrawerReservationResponse:
+class DrawerReservationResponse(BaseModel):
     drawer_id: int
     freezer_asset_id: str
     layer_number: int
@@ -22,6 +22,9 @@ class DrawerReservationResponse:
     drawer_coordinate: str
     reserved: bool
     reserved_reason: Optional[str] = None
+
+    class Config:
+        from_attributes = True
 
 @router.post("/reserve-drawer", response_model=DrawerReservationResponse)
 def reserve_drawer(
@@ -47,14 +50,14 @@ def reserve_drawer(
     
     if not result:
         raise HTTPException(status_code=404, detail="Drawer not found")
-    
-    # Get the updated drawer information
+
+    db.commit()
+
+    # Fetch the updated drawer coordinates after committing
     drawer = db.execute(
         text("SELECT * FROM drawer_coordinates WHERE drawer_id = :drawer_id"),
         {"drawer_id": request.drawer_id}
     ).fetchone()
-    
-    db.commit()
     
     return {
         "drawer_id": drawer.drawer_id,

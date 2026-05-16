@@ -1,0 +1,8 @@
+-- This seed file is OBSOLETE and must not be executed.
+--
+-- It previously seeded container_type, drawer_type, and drawer_capacity tables
+-- which were removed when the schema was redesigned.
+--
+-- Capacity is now defined per freezer via the study_sample_capacity and
+-- stdqc_capacity columns on the freezer table itself.
+-- Seed data for freezers is inserted through the POST /api/v1/freezers endpoint.

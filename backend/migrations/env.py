@@ -15,6 +15,10 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.models.base import Base
 from app.database import SQLALCHEMY_DATABASE_URL
 
+# Import all models so they register against Base.metadata before Alembic inspects it.
+# Without these imports, autogenerate sees an empty schema and produces wrong migrations.
+import app.models  # noqa: F401
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config

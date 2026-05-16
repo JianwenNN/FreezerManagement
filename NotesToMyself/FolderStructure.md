@@ -1,0 +1,43 @@
+```
+└── 📁backend
+    └── 📁app
+        └── 📁api
+            └── 📁endpoints
+                ├── admin.py
+                ├── containers.py
+                ├── freezers.py
+                ├── samples.py
+            ├── api.py
+        └── 📁models
+            ├── __init__.py
+            ├── base.py
+            ├── container.py
+            ├── freezer.py
+        └── 📁schemas
+            ├── __init__.py
+            ├── container.py
+            ├── freezer.py
+        └── 📁sql
+            └── 📁functions
+                ├── allocate_containers_in_proximity.sql
+                ├── available_space_in_drawer.sql
+                ├── check_stdqc_container_capacity.sql
+                ├── check_study_sample_container_capacity.sql
+            └── 📁seeds
+                ├── initial_data.sql
+            └── 📁triggers
+                ├── enforce_stdqc_samples_capacity.sql
+                ├── enforce_study_samples_capacity.sql
+            └── 📁views
+                ├── drawer_coordinates.sql
+        ├── database.py
+        ├── main.py
+        ├── scheduler.py
+    └── 📁migrations
+        └── 📁versions
+            ├── 001_initial_schema.py
+            ├── 002_add_drawer_reservation.py
+        ├── env.py
+        ├── README
+        └── script.py.mako
+```
