@@ -22,6 +22,7 @@ Expired rows are purged by a background job (APScheduler, every minute).
 
 from alembic import op
 import sqlalchemy as sa
+import os
 
 
 revision      = '002_add_drawer_reservation'
@@ -30,12 +31,10 @@ branch_labels = None
 depends_on    = None
 
 
-import os
-
 
 def _load_sql(relative_path: str) -> str:
     base = os.path.dirname(os.path.abspath(__file__))
-    full_path = os.path.join(base, "..", "app", "sql", relative_path)
+    full_path = os.path.join(base, "..", "..", "app", "sql", *relative_path.split("/"))
     with open(full_path) as fh:
         return fh.read()
 

@@ -1,0 +1,73 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# virtual environments
+venv/
+.venv/
+env/
+ENV/
+.env/
+
+# distribution / packaging
+dist/
+build/
+*.egg-info/
+pip-wheel-metadata/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# =========================
+# Node / React
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+dist/
+build/
+coverage/
+
+# Vite / CRA build outputs
+.vite/
+.cache/
+
+# environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# =========================
+# OS / IDE
+# =========================
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# IntelliJ
+.idea/
+
+# =========================
+# Logs
+# =========================
+logs/
+*.log
+
+# =========================
+# Misc
+# =========================
+*.swp
+*.swo
+NotesToMyself/

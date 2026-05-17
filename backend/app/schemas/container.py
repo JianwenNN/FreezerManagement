@@ -236,3 +236,149 @@ class STDQCBatchSearchResult(BaseModel):
     description:     Optional[str] = None
     total_count:     int
     containers:      List[STDQCContainerResult]
+
+
+# ---------------------------------------------------------------------------
+# Retrieval — study sample containers
+# ---------------------------------------------------------------------------
+
+class StudySampleRetrievalPreviewRequest(BaseModel):
+    """
+    Request to preview the locations of study sample containers before removal.
+    The user provides the list of barcodes they intend to retrieve.
+    """
+    container_barcodes: List[str] = Field(..., min_length=1)
+
+
+class StudySampleRetrievalPreviewItem(BaseModel):
+    """One container returned in the retrieval preview."""
+    id:                 int
+    container_barcode:  str
+    study_name:         str
+    position_in_drawer: Optional[str] = None
+    date_added:         datetime
+    location:           DrawerLocation
+
+
+class StudySampleRetrievalPreviewResponse(BaseModel):
+    """
+    Preview response showing where each requested container is located.
+    Includes any barcodes that were not found so the user can review
+    before confirming removal.
+    """
+    found:       List[StudySampleRetrievalPreviewItem]
+    not_found:   List[str]   # barcodes that had no match in the DB
+    total_found: int
+
+
+class StudySampleRetrievalConfirmRequest(BaseModel):
+    """
+    Confirmation payload to permanently remove study sample containers.
+    The user echoes back only the barcodes they actually retrieved —
+    they may choose to remove a subset of what was previewed.
+    """
+    container_barcodes: List[str] = Field(..., min_length=1)
+
+
+class RemovedContainer(BaseModel):
+    """One successfully removed container."""
+    id:                int
+    container_barcode: str
+    study_name:        str
+    drawer_coordinate: str
+
+
+class StudySampleRetrievalConfirmResponse(BaseModel):
+    """Result of a confirmed study sample retrieval."""
+    total_removed: int
+    not_found:     List[str]   # barcodes submitted but not found (already removed?)
+    removed:       List[RemovedContainer]
+
+
+# ---------------------------------------------------------------------------
+# Retrieval — STDQC containers
+# ---------------------------------------------------------------------------
+
+class STDQCRetrievalPreviewResponse(BaseModel):
+    """
+    Preview response showing all containers in a STDQC batch before removal.
+    Reuses STDQCBatchSearchResult since the data shape is identical —
+    the user sees the full batch with locations before confirming removal.
+    """
+    barcode_prefix: str
+    compound_name:  str
+    matrix:         str
+    anticoagulant:  str
+    prep_date:      datetime
+    description:    Optional[str] = None
+    total_count:    int
+    containers:     List[STDQCContainerResult]
+
+
+class STDQCRetrievalConfirmRequest(BaseModel):
+    """
+    Confirmation payload to permanently remove an entire STDQC batch.
+    The barcode_prefix identifies the batch — all containers with
+    source_ids matching '<prefix>-<n>' will be deleted.
+    """
+    barcode_prefix: str
+
+
+class STDQCRetrievalConfirmResponse(BaseModel):
+    """Result of a confirmed STDQC batch retrieval."""
+    barcode_prefix: str
+    total_removed:  int
+
+
+# ---------------------------------------------------------------------------
+# Manual assignment — study sample containers
+#
+# Direct write path — no reservation tokens, no two-stage flow.
+# User selects a specific drawer and provides full container details.
+# System validates capacity (respecting active reservations) and inserts
+# immediately under an advisory lock.
+# ---------------------------------------------------------------------------
+
+class ManualStudySampleAssignRequest(BaseModel):
+    """
+    Payload for manually assigning study sample containers to a specific drawer.
+
+    drawer_id:   The drawer the user has physically chosen.
+    containers:  Full details for each container being placed.
+                 Must not exceed effective available capacity
+                 (capacity - actual containers - active reservations).
+    """
+    drawer_id:  int
+    containers: List[StudySampleContainerDetail] = Field(..., min_length=1)
+
+
+class ManualStudySampleAssignResponse(BaseModel):
+    """Response after a successful manual study sample assignment."""
+    drawer_id:         int
+    drawer_coordinate: str
+    total_assigned:    int
+    containers:        List[StudySampleConfirmedContainer]
+
+
+# ---------------------------------------------------------------------------
+# Manual assignment — STDQC containers
+# ---------------------------------------------------------------------------
+
+class ManualSTDQCAssignRequest(BaseModel):
+    """
+    Payload for manually assigning a STDQC bulk batch to a specific drawer.
+
+    drawer_id: The drawer the user has physically chosen.
+    batch:     Shared metadata and count for the batch being placed.
+               Must not exceed effective available capacity.
+    """
+    drawer_id:      int
+    batch:          STDQCBatchDetail
+
+
+class ManualSTDQCAssignResponse(BaseModel):
+    """Response after a successful manual STDQC assignment."""
+    drawer_id:         int
+    drawer_coordinate: str
+    total_assigned:    int
+    containers:        List[STDQCConfirmedContainer]

@@ -39,7 +39,7 @@ depends_on    = None
 # ---------------------------------------------------------------------------
 def _load_sql(relative_path: str) -> str:
     base = os.path.dirname(os.path.abspath(__file__))
-    full_path = os.path.join(base, "..", "app", "sql", relative_path)
+    full_path = os.path.join(base, "..", "..", "app", "sql", *relative_path.split("/"))
     with open(full_path) as fh:
         return fh.read()
 

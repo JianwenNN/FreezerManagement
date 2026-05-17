@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import List, Callable, Any
+from typing import Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -47,7 +47,7 @@ def _resolve_reservation(
     drawer_id:   int,
     sample_type: str,
     token:       str,
-) -> tuple[bool, str | None]:
+) -> Tuple[bool, Optional[str]]:
     """
     Validate a reservation token.
 
@@ -98,6 +98,13 @@ def allocate_containers_in_proximity(
     """
     Suggest which drawers to use for a batch of containers and create
     soft-hold reservations for each drawer.
+
+    The response includes one `reservation_token` per drawer. The frontend
+    must echo these tokens back in the confirm request. Reservations expire
+    after 5 minutes; expired reservations trigger a live capacity re-check
+    at confirmation time rather than an outright rejection.
+
+    Nothing other than the reservation rows is written at this stage.
     """
     results = db.execute(
         text("""
@@ -136,12 +143,15 @@ def allocate_containers_in_proximity(
         ).fetchall()
     }
 
-    reservations = {
-        row.drawer_id: _create_reservation(
+    # Create a reservation for each drawer and commit them all at once.
+    # This is a separate commit from the container inserts — the reservation
+    # lifetime is independent of the confirmation transaction.
+    reservations: Dict[int, DrawerReservation] = {}
+    for row in results:
+        reservation = _create_reservation(
             db, row.drawer_id, request.sample_type, row.container_count
         )
-        for row in results
-    }
+        reservations[row.drawer_id] = reservation
     db.commit()
 
     allocations = []
@@ -168,21 +178,20 @@ def allocate_containers_in_proximity(
 # Internal: per-drawer critical section (used by both confirm endpoints)
 # ---------------------------------------------------------------------------
 
-def _confirm_drawer(
-    db:                  Session,
-    drawer_id:           int,
-    sample_type:         str,
-    token:               str,
-    containers_to_insert: int,
-) -> None:
+def _acquire_drawer_lock(db: Session, drawer_id: int) -> None:
     """
-    Short critical section for one drawer:
-      1. Acquire advisory lock (milliseconds, released on commit)
-      2. Validate or re-check capacity
-      3. Delete the reservation
+    Acquire a transaction-scoped advisory lock on drawer_id.
+    Blocks any other transaction attempting the same lock until this
+    transaction commits or rolls back — typically milliseconds.
     """
     db.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": drawer_id})
 
+
+def _validate_drawer(db: Session, drawer_id: int) -> None:
+    """
+    Confirm the drawer exists and is not administratively reserved.
+    Raises HTTPException on failure.
+    """
     drawer = db.execute(
         text("SELECT id, reserved FROM drawer WHERE id = :id"),
         {"id": drawer_id}
@@ -196,109 +205,98 @@ def _confirm_drawer(
             detail=f"Drawer {drawer_id} is reserved and cannot accept containers."
         )
 
-    is_valid, reason = _resolve_reservation(db, drawer_id, sample_type, token)
 
-    if not is_valid:
-        if reason == "not_found":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Reservation token for drawer {drawer_id} not found. Please re-run the allocation."
-            )
-        if reason == "drawer_mismatch":
-            raise HTTPException(
-                status_code=409,
-                detail=f"Reservation token does not match drawer {drawer_id}."
-            )
+def _check_capacity(
+    db:                  Session,
+    drawer_id:           int,
+    sample_type:         str,
+    containers_to_insert: int,
+    expired_reservation: bool = False,
+) -> None:
+    """
+    Verify effective available space >= containers_to_insert.
+    effective_available = capacity - actual_containers - active_reservations
 
-    _delete_reservation(db, token)
+    Must be called AFTER any reservation for this drawer has been deleted
+    from the current transaction, otherwise the caller's own reservation
+    would be subtracted from their own available space.
 
+    Raises HTTPException(409) if capacity is insufficient.
+    """
     remaining_space = db.execute(
         text("SELECT available_space_in_drawer(:drawer_id, :sample_type)"),
         {"drawer_id": drawer_id, "sample_type": sample_type}
     ).scalar()
 
     if containers_to_insert > remaining_space:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                f"Drawer {drawer_id} only has space for {remaining_space} more "
-                f"{'containers' if remaining_space != 1 else 'container'}, "
-                f"but {containers_to_insert} were submitted."
-                + (" Reservation had expired — space was claimed by another user."
-                   if reason == "expired" else "")
-            ).strip()
+        detail = (
+            f"Drawer {drawer_id} only has space for {remaining_space} more "
+            f"{'containers' if remaining_space != 1 else 'container'}, "
+            f"but {containers_to_insert} were submitted."
         )
+        if expired_reservation:
+            detail += " Reservation had expired — space was claimed by another user."
+        raise HTTPException(status_code=409, detail=detail.strip())
 
 
-# ---------------------------------------------------------------------------
-# Internal Pipeline Orchestrator (Eliminates Duplication)
-# ---------------------------------------------------------------------------
-
-def _confirm_allocation_pipeline(
-    db: Session,
-    request: Any,
-    sample_type: str,
-    get_count_func: Callable[[Any], int],
-    insert_func: Callable[[int, Any], List[Any]]
-) -> tuple[List[Any], dict[int, str], List[str]]:
+def _confirm_drawer(
+    db:                  Session,
+    drawer_id:           int,
+    sample_type:         str,
+    token:               str,
+    containers_to_insert: int,
+) -> None:
     """
-    Shared orchestration logic for validating, locking, and processing drawer confirmations.
-    
-    Args:
-        get_count_func: Sub-routine to calculate incoming containers for a specific drawer.
-        insert_func: Sub-routine handling specific ORM model initialization and database flushes.
+    Short critical section for the reservation-based confirm flow:
+      1. Acquire advisory lock
+      2. Validate drawer exists and is not reserved
+      3. Validate reservation token (or note expiry)
+      4. Delete reservation (before capacity check — see _check_capacity docstring)
+      5. Check effective available capacity
+    Inserts are done by the caller after this returns.
     """
-    # 1. Under-submission guard
-    total_submitted = sum(get_count_func(d) for d in request.drawers)
-    if not request.partial_allowed and total_submitted != request.originally_requested:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Expected {request.originally_requested} containers but {total_submitted} were submitted. "
-                f"Set partial_allowed=True if the freezer could not fit all containers."
+    _acquire_drawer_lock(db, drawer_id)
+    _validate_drawer(db, drawer_id)
+
+    # Validate the reservation token
+    is_valid, reason = _resolve_reservation(db, drawer_id, sample_type, token)
+
+    if not is_valid:
+        if reason == "not_found":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Reservation token for drawer {drawer_id} not found. "
+                       f"Please re-run the allocation."
             )
-        )
+        if reason == "drawer_mismatch":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Reservation token does not match drawer {drawer_id}."
+            )
+        # reason == 'expired': fall through — delete reservation and re-check capacity
 
-    if len(request.reservation_tokens) != len(request.drawers):
-        raise HTTPException(
-            status_code=422,
-            detail="reservation_tokens must have one entry per drawer in the same order as drawers."
-        )
+    # Delete reservation BEFORE capacity check (see _check_capacity docstring)
+    _delete_reservation(db, token)
+    _check_capacity(db, drawer_id, sample_type, containers_to_insert,
+                    expired_reservation=(reason == "expired"))
 
-    confirmed_rows = []
 
-    # 2. Main lock & insertion loop
-    for drawer_confirmation, token in zip(request.drawers, request.reservation_tokens):
-        drawer_id = drawer_confirmation.drawer_id
-        containers_to_insert = get_count_func(drawer_confirmation)
-
-        _confirm_drawer(db, drawer_id, sample_type, token, containers_to_insert)
-        
-        # Call type-specific DB insertion logic passed from the route
-        inserted = insert_func(drawer_id, drawer_confirmation)
-        confirmed_rows.extend(inserted)
-
-    db.commit()
-
-    # 3. Batch-resolve drawer coordinates
-    drawer_ids = list({r.drawer_id for r in confirmed_rows})
-    coordinates = {
-        row.drawer_id: row.drawer_coordinate
-        for row in db.execute(
-            text("""
-                SELECT drawer_id, drawer_coordinate
-                FROM drawer_coordinates
-                WHERE drawer_id = ANY(:ids)
-            """),
-            {"ids": drawer_ids}
-        ).fetchall()
-    }
-
-    alternative_freezers = (
-        _find_alternative_freezers(db, request, len(confirmed_rows)) if request.partial_allowed else []
-    )
-
-    return confirmed_rows, coordinates, alternative_freezers
+def _manual_validate_drawer(
+    db:                  Session,
+    drawer_id:           int,
+    sample_type:         str,
+    containers_to_insert: int,
+) -> None:
+    """
+    Critical section for the manual assignment flow (no reservation token):
+      1. Acquire advisory lock
+      2. Validate drawer exists and is not reserved
+      3. Check effective available capacity (respects active reservations)
+    Inserts are done by the caller after this returns.
+    """
+    _acquire_drawer_lock(db, drawer_id)
+    _validate_drawer(db, drawer_id)
+    _check_capacity(db, drawer_id, sample_type, containers_to_insert)
 
 
 # ---------------------------------------------------------------------------
@@ -313,28 +311,54 @@ def confirm_study_sample_allocation(
     request: schemas.StudySampleAllocationConfirmRequest,
     db: Session = Depends(get_db)
 ):
-    """Commit a study sample allocation to the database."""
-    
-    def insert_study_samples(drawer_id: int, confirmation: Any) -> List[StudySampleContainer]:
-        batch_rows = []
-        for container in confirmation.containers:
-            row = StudySampleContainer(
-                drawer_id          = drawer_id,
-                container_barcode  = container.container_barcode,
-                study_name         = container.study_name,
-                position_in_drawer = container.position_in_drawer,
-            )
-            db.add(row)
-            db.flush()
-            batch_rows.append(row)
-        return batch_rows
+    """
+    Commit a study sample allocation to the database.
 
-    confirmed, coordinates, alternative_freezers = _confirm_allocation_pipeline(
-        db=db,
-        request=request,
-        sample_type="study_sample_container",
-        get_count_func=lambda d: len(d.containers),
-        insert_func=insert_study_samples
+    For each drawer:
+      1. Acquire a per-drawer advisory lock (released on commit)
+      2. Validate the reservation token (or re-check capacity if expired)
+      3. Re-check live capacity
+      4. Insert containers
+      5. Delete reservation
+
+    The entire operation is one short transaction committed immediately.
+    """
+    # Under-submission guard
+    total_submitted = sum(len(d.containers) for d in request.drawers)
+    if not request.partial_allowed and total_submitted != request.originally_requested:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Expected {request.originally_requested} containers "
+                f"but {total_submitted} were submitted. "
+                f"Set partial_allowed=True if the freezer could not fit all containers."
+            )
+        )
+
+    if len(request.reservation_tokens) != len(request.drawers):
+        raise HTTPException(
+            status_code=422,
+            detail="reservation_tokens must have one entry per drawer in the same order as drawers."
+        )
+
+    confirmed = []
+
+    for drawer_confirmation, token in zip(request.drawers, request.reservation_tokens):
+        drawer_id            = drawer_confirmation.drawer_id
+        containers_to_insert = len(drawer_confirmation.containers)
+
+        _confirm_drawer(db, drawer_id, "study_sample_container", token, containers_to_insert)
+
+        for container in drawer_confirmation.containers:
+            confirmed.extend(
+                _insert_study_sample_containers(db, drawer_id, [container])
+            )
+
+    db.commit()
+
+    coordinates = _resolve_coordinates(db, confirmed)
+    alternative_freezers = (
+        _find_alternative_freezers(db, request, len(confirmed)) if request.partial_allowed else []
     )
 
     return {
@@ -367,37 +391,48 @@ def confirm_stdqc_allocation(
     request: schemas.STDQCAllocationConfirmRequest,
     db: Session = Depends(get_db)
 ):
-    """Commit a STDQC allocation to the database."""
-    
-    # Track across drawer iterations to avoid resetting barcode prefix suffix sequence
-    state = {"barcode_counter": 1}
-
-    def insert_stdqc_samples(drawer_id: int, confirmation: Any) -> List[STDQCContainer]:
-        batch_rows = []
-        batch = confirmation.batch
-        for _ in range(batch.container_count):
-            row = STDQCContainer(
-                drawer_id          = drawer_id,
-                compound_name      = batch.compound_name,
-                matrix             = batch.matrix,
-                anticoagulant      = batch.anticoagulant,
-                prep_date          = batch.prep_date,
-                source_id          = f"{batch.barcode_prefix}-{state['barcode_counter']}",
-                description        = batch.description,
-                position_in_drawer = batch.position_in_drawer,
+    """
+    Commit a STDQC allocation to the database.
+    Same reservation validation and critical-section logic as study samples.
+    """
+    # Under-submission guard
+    total_submitted = sum(d.batch.container_count for d in request.drawers)
+    if not request.partial_allowed and total_submitted != request.originally_requested:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Expected {request.originally_requested} containers "
+                f"but {total_submitted} were submitted. "
+                f"Set partial_allowed=True if the freezer could not fit all containers."
             )
-            db.add(row)
-            db.flush()
-            batch_rows.append(row)
-            state["barcode_counter"] += 1
-        return batch_rows
+        )
 
-    confirmed, coordinates, alternative_freezers = _confirm_allocation_pipeline(
-        db=db,
-        request=request,
-        sample_type="stdqc_container",
-        get_count_func=lambda d: d.batch.container_count,
-        insert_func=insert_stdqc_samples
+    if len(request.reservation_tokens) != len(request.drawers):
+        raise HTTPException(
+            status_code=422,
+            detail="reservation_tokens must have one entry per drawer in the same order as drawers."
+        )
+
+    confirmed    = []
+    barcode_counter = 1
+
+    for drawer_confirmation, token in zip(request.drawers, request.reservation_tokens):
+        drawer_id            = drawer_confirmation.drawer_id
+        batch                = drawer_confirmation.batch
+        containers_to_insert = batch.container_count
+
+        _confirm_drawer(db, drawer_id, "stdqc_container", token, containers_to_insert)
+
+        new_rows, barcode_counter = _insert_stdqc_containers(
+            db, drawer_id, batch, barcode_counter
+        )
+        confirmed.extend(new_rows)
+
+    db.commit()
+
+    coordinates = _resolve_coordinates(db, confirmed)
+    alternative_freezers = (
+        _find_alternative_freezers(db, request, len(confirmed)) if request.partial_allowed else []
     )
 
     return {
@@ -425,9 +460,278 @@ def confirm_stdqc_allocation(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def _insert_study_sample_containers(
+    db:         Session,
+    drawer_id:  int,
+    containers: list,
+) -> list:
+    """
+    Insert study sample container rows and return the flushed ORM objects.
+    Caller is responsible for db.commit().
+    """
+    rows = []
+    for container in containers:
+        row = StudySampleContainer(
+            drawer_id          = drawer_id,
+            container_barcode  = container.container_barcode,
+            study_name         = container.study_name,
+            position_in_drawer = container.position_in_drawer,
+        )
+        db.add(row)
+        db.flush()
+        rows.append(row)
+    return rows
+
+
+def _insert_stdqc_containers(
+    db:              Session,
+    drawer_id:       int,
+    batch,
+    start_counter:   int,
+) -> tuple:
+    """
+    Insert STDQC container rows for a batch and return (rows, next_counter).
+    Barcodes are generated as <prefix>-<start_counter>, <prefix>-<start_counter+1>, ...
+    Caller is responsible for db.commit().
+    """
+    rows = []
+    counter = start_counter
+    for _ in range(batch.container_count):
+        row = STDQCContainer(
+            drawer_id          = drawer_id,
+            compound_name      = batch.compound_name,
+            matrix             = batch.matrix,
+            anticoagulant      = batch.anticoagulant,
+            prep_date          = batch.prep_date,
+            source_id          = f"{batch.barcode_prefix}-{counter}",
+            description        = batch.description,
+            position_in_drawer = batch.position_in_drawer,
+        )
+        db.add(row)
+        db.flush()
+        rows.append(row)
+        counter += 1
+    return rows, counter
+
+
+def _resolve_coordinates(db: Session, confirmed: list) -> dict:
+    """
+    Batch-fetch drawer coordinates for a list of inserted container rows.
+    Returns {drawer_id: drawer_coordinate}.
+    """
+    drawer_ids = list({r.drawer_id for r in confirmed})
+    return {
+        row.drawer_id: row.drawer_coordinate
+        for row in db.execute(
+            text("""
+                SELECT drawer_id, drawer_coordinate
+                FROM drawer_coordinates
+                WHERE drawer_id = ANY(:ids)
+            """),
+            {"ids": drawer_ids}
+        ).fetchall()
+    }
+
+
+
+def _insert_study_sample_containers(
+    db:         Session,
+    drawer_id:  int,
+    containers: list,
+) -> list:
+    """
+    Insert study sample container rows and return the flushed ORM objects.
+    Caller is responsible for db.commit().
+    """
+    rows = []
+    for container in containers:
+        row = StudySampleContainer(
+            drawer_id          = drawer_id,
+            container_barcode  = container.container_barcode,
+            study_name         = container.study_name,
+            position_in_drawer = container.position_in_drawer,
+        )
+        db.add(row)
+        db.flush()
+        rows.append(row)
+    return rows
+
+
+def _insert_stdqc_containers(
+    db:            Session,
+    drawer_id:     int,
+    batch,
+    start_counter: int,
+) -> tuple:
+    """
+    Insert STDQC container rows for a batch and return (rows, next_counter).
+    Barcodes are generated as <prefix>-<start_counter>, <prefix>-<start_counter+1>, ...
+    Caller is responsible for db.commit().
+    """
+    rows = []
+    counter = start_counter
+    for _ in range(batch.container_count):
+        row = STDQCContainer(
+            drawer_id          = drawer_id,
+            compound_name      = batch.compound_name,
+            matrix             = batch.matrix,
+            anticoagulant      = batch.anticoagulant,
+            prep_date          = batch.prep_date,
+            source_id          = f"{batch.barcode_prefix}-{counter}",
+            description        = batch.description,
+            position_in_drawer = batch.position_in_drawer,
+        )
+        db.add(row)
+        db.flush()
+        rows.append(row)
+        counter += 1
+    return rows, counter
+
+
+def _resolve_coordinates(db: Session, confirmed: list) -> dict:
+    """
+    Batch-fetch drawer coordinates for a list of inserted container rows.
+    Returns {drawer_id: drawer_coordinate}.
+    """
+    drawer_ids = list({r.drawer_id for r in confirmed})
+    return {
+        row.drawer_id: row.drawer_coordinate
+        for row in db.execute(
+            text("""
+                SELECT drawer_id, drawer_coordinate
+                FROM drawer_coordinates
+                WHERE drawer_id = ANY(:ids)
+            """),
+            {"ids": drawer_ids}
+        ).fetchall()
+    }
+
 def _find_alternative_freezers(db: Session, request, confirmed_count: int) -> List[str]:
     """
     Stub: returns asset_ids of freezers at the same temperature that have
     enough remaining space for the unplaced containers.
+
+    TODO: implement when cross-freezer recommendation is scoped.
+          Required fields now available on request:
+          - request.freezer_asset_id: the original freezer
+          - request.originally_requested: total containers requested
+          - confirmed_count: how many were actually placed
+          Remaining = originally_requested - confirmed_count
     """
     return []
+
+
+# ---------------------------------------------------------------------------
+# Manual assignment — study sample containers
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/manual/study-sample/",
+    response_model=schemas.ManualStudySampleAssignResponse,
+    status_code=201,
+)
+def manual_assign_study_samples(
+    request: schemas.ManualStudySampleAssignRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Manually assign study sample containers to a specific drawer.
+
+    Does NOT participate in the reservation system — no token required.
+    Respects active reservations: effective available space is
+    capacity - actual_containers - active_reservations.
+
+    All validation and inserts happen in one short transaction
+    protected by a per-drawer advisory lock.
+    """
+    drawer_id            = request.drawer_id
+    containers_to_insert = len(request.containers)
+
+    _manual_validate_drawer(db, drawer_id, "study_sample_container", containers_to_insert)
+
+    confirmed = _insert_study_sample_containers(db, drawer_id, request.containers)
+
+    db.commit()
+
+    coordinates = _resolve_coordinates(db, confirmed)
+    drawer_coordinate = coordinates[drawer_id]
+
+    return {
+        "drawer_id":         drawer_id,
+        "drawer_coordinate": drawer_coordinate,
+        "total_assigned":    len(confirmed),
+        "containers": [
+            {
+                "id":                 r.id,
+                "drawer_id":          r.drawer_id,
+                "drawer_coordinate":  drawer_coordinate,
+                "container_barcode":  r.container_barcode,
+                "study_name":         r.study_name,
+                "position_in_drawer": r.position_in_drawer,
+            }
+            for r in confirmed
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Manual assignment — STDQC containers
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/manual/stdqc/",
+    response_model=schemas.ManualSTDQCAssignResponse,
+    status_code=201,
+)
+def manual_assign_stdqc(
+    request: schemas.ManualSTDQCAssignRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Manually assign a STDQC batch to a specific drawer.
+
+    Same rules as manual study sample assignment — no reservation token,
+    respects active reservations, advisory lock, immediate commit.
+    """
+    drawer_id            = request.drawer_id
+    batch                = request.batch
+    containers_to_insert = batch.container_count
+
+    _manual_validate_drawer(db, drawer_id, "stdqc_container", containers_to_insert)
+
+    # Start barcode counter from the next available suffix for this prefix
+    # to avoid collisions if the prefix was used before in this drawer.
+    existing_count = db.execute(
+        text("""
+            SELECT COUNT(*) FROM stdqc_container
+            WHERE source_id LIKE :pattern
+        """),
+        {"pattern": f"{batch.barcode_prefix}-%"}
+    ).scalar() or 0
+
+    confirmed, _ = _insert_stdqc_containers(db, drawer_id, batch, start_counter=existing_count + 1)
+
+    db.commit()
+
+    coordinates = _resolve_coordinates(db, confirmed)
+    drawer_coordinate = coordinates[drawer_id]
+
+    return {
+        "drawer_id":         drawer_id,
+        "drawer_coordinate": drawer_coordinate,
+        "total_assigned":    len(confirmed),
+        "containers": [
+            {
+                "id":                 r.id,
+                "drawer_id":          r.drawer_id,
+                "drawer_coordinate":  drawer_coordinate,
+                "compound_name":      r.compound_name,
+                "matrix":             r.matrix,
+                "anticoagulant":      r.anticoagulant,
+                "prep_date":          r.prep_date,
+                "source_id":          r.source_id,
+                "position_in_drawer": r.position_in_drawer,
+            }
+            for r in confirmed
+        ],
+    }
