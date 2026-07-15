@@ -7,6 +7,8 @@ from app.main import app
 from app.database import get_db
 from app.models import Base
 
+from sqlalchemy import create_engine, text
+
 from pathlib import Path
 
 VIEW_SQL = Path(__file__).parent.parent / "app" / "sql" / "drawer_coordinates.sql"
