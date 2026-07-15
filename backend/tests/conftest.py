@@ -11,7 +11,7 @@ from sqlalchemy import create_engine, text
 
 from pathlib import Path
 
-VIEW_SQL = Path(__file__).parent.parent / "app" / "sql" / "drawer_coordinates.sql"
+VIEW_SQL = Path(__file__).parent.parent / "app" / "sql" / "views" / "drawer_coordinates.sql"
 
 TEST_DB_URL = "postgresql://postgres:password@localhost:5432/freezer_test"
 
