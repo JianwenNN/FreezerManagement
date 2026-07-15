@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+
+    # Throwaway Postgres for this job only — separate from your real RDS instance.
+    # Credentials/DB name match what conftest.py hardcodes (postgres/password/freezer_test).
+    # Requires alembic/env.py to read ALEMBIC_DATABASE_URL from env (see backend/migrations/env.py note).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: freezer_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # Points alembic/env.py at the CI Postgres service instead of your local hardcoded
+    # freezer_management DB. Same DB conftest.py already hardcodes tests against.
+    env:
+      ALEMBIC_DATABASE_URL: postgresql://postgres:password@localhost:5432/freezer_test
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          # TODO: adjust path if requirements.txt lives elsewhere (e.g. backend/requirements.txt)
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run Alembic migrations (creates schema, PL/pgSQL functions, triggers)
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Run backend tests
+        working-directory: backend
+        run: pytest -v
+
+  frontend-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        # TODO: if the build needs VITE_API_URL or similar at build time, add it here
+        run: npm run build
