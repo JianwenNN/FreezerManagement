@@ -21,7 +21,7 @@ def make_client():
             pass
 
     app.dependency_overrides[get_db] = override
-    client = TestClient(app, raise_server_exceptions=False)
+    client = TestClient(app, raise_server_exceptions=True)
     return client, session
 
 
