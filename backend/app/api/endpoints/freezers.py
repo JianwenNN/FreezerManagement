@@ -150,3 +150,66 @@ def list_freezers(db: Session = Depends(get_db)):
         }
         for f in rows
     ]
+
+# ---------------------------------------------------------------------------
+# List drawers for a freezer (real drawer_id + coordinates)
+#
+# ADD THIS to backend/app/api/endpoints/freezers.py
+#
+# Why this exists
+# ----------------
+# The frontend grid (useFreezer.js) is built synthetically from freezer
+# dimensions alone — it never knew the real `drawer_id` primary key for
+# each cell. Manual assignment was sending `drawerNum` (the drawer's
+# position WITHIN ITS RACK, e.g. 1-5, which repeats across every rack)
+# to the backend as if it were `drawer_id` (a globally unique integer).
+# This let manual assignments silently land on the wrong physical drawer,
+# bypassing the type-lock / capacity checks for the drawer the user
+# actually clicked.
+#
+# This endpoint gives the frontend the real drawer_id for every
+# (layer, rack, drawer) coordinate in a freezer, sourced from the
+# existing drawer_coordinates view — no new SQL objects needed.
+# ---------------------------------------------------------------------------
+
+@router.get("/{asset_id}/drawers", response_model=List[schemas.DrawerLocation])
+def list_freezer_drawers(asset_id: str, db: Session = Depends(get_db)):
+    """
+    Return every drawer in a freezer with its real drawer_id and full
+    coordinate breakdown. Used by the frontend to resolve a clicked grid
+    cell (layer/rack/drawer number) to the actual database drawer_id
+    before submitting a manual assignment.
+    """
+    freezer = db.execute(
+        text("SELECT id FROM freezer WHERE asset_id = :asset_id"),
+        {"asset_id": asset_id}
+    ).fetchone()
+
+    if not freezer:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Freezer with asset_id '{asset_id}' not found."
+        )
+
+    rows = db.execute(
+        text("""
+            SELECT drawer_id, freezer_asset_id, layer_number,
+                   rack_number, drawer_number, drawer_coordinate
+            FROM   drawer_coordinates
+            WHERE  freezer_asset_id = :asset_id
+            ORDER  BY layer_number, rack_number, drawer_number
+        """),
+        {"asset_id": asset_id}
+    ).fetchall()
+
+    return [
+        {
+            "drawer_id":         r.drawer_id,
+            "freezer_asset_id":  r.freezer_asset_id,
+            "layer_number":      r.layer_number,
+            "rack_number":       r.rack_number,
+            "drawer_number":     r.drawer_number,
+            "drawer_coordinate": r.drawer_coordinate,
+        }
+        for r in rows
+    ]

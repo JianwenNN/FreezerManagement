@@ -187,13 +187,28 @@ function ContainerIntroductionPage() {
       )
     );
 
+    // Guard: every selected cell must have its real drawer_id resolved
+    // (populated by selectFreezer() via listFreezerDrawersFn()). Without
+    // this, we'd fall back to sending drawerNum — the bug this guard
+    // exists to prevent (drawerNum repeats across racks and is NOT the
+    // database drawer_id, so it can silently target the wrong drawer).
+    const missingId = selected.find(d => d.id == null);
+    if (missingId) {
+      setManualError(
+        `Drawer IDs haven't finished loading for ${missingId.coord}. ` +
+        `Please wait a moment or re-select the freezer, then try again.`
+      );
+      setConfirming(false);
+      return;
+    }
+
     try {
       if (sampleType === 'study_sample_container') {
         const barcodes = [...formData.containers];
         for (const d of selected) {
           const slice = barcodes.splice(0, d.manualCount);
           await manualAssignStudySampleFn({
-            drawer_id:  d.drawerNum, // need actual drawer_id from backend
+            drawer_id:  d.id,
             containers: slice.map(bc => ({
               container_barcode:  bc,
               study_name:         formData.study_name,
@@ -204,7 +219,7 @@ function ContainerIntroductionPage() {
       } else {
         for (const d of selected) {
           await manualAssignSTDQCFn({
-            drawer_id: d.drawerNum, // need actual drawer_id from backend
+            drawer_id: d.id,
             batch: {
               barcode_prefix:     formData.barcode_prefix,
               container_count:    d.manualCount,

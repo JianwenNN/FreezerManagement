@@ -10,12 +10,17 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.models.base import Base
 import app.models  # noqa: F401
 
+from dotenv import load_dotenv
+load_dotenv()
 config = context.config
 
 # Hard-code the URL directly — no imports, no env vars
 config.set_main_option(
     "sqlalchemy.url",
-    "postgresql://postgres:password@127.0.0.1:5432/freezer_management"
+    os.environ.get(
+        "ALEMBIC_DATABASE_URL",
+        "postgresql://postgres:password@127.0.0.1:5432/freezer_management",
+    ),
 )
 
 if config.config_file_name is not None:
