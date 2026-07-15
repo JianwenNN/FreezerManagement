@@ -7,6 +7,10 @@ from app.main import app
 from app.database import get_db
 from app.models import Base
 
+from pathlib import Path
+
+VIEW_SQL = Path(__file__).parent.parent / "app" / "sql" / "drawer_coordinates.sql"
+
 TEST_DB_URL = "postgresql://postgres:password@localhost:5432/freezer_test"
 
 engine = create_engine(TEST_DB_URL)
@@ -16,8 +20,15 @@ TestingSession = sessionmaker(bind=engine)
 @pytest.fixture(scope="function", autouse=True)
 def setup_db():
     """Recreate all tables before each test, drop after."""
+    with engine.begin() as conn:
+        conn.execute(text("DROP VIEW IF EXISTS drawer_coordinates"))
+    Base.metadata.drop_all(bind=engine)  # safety net in case a prior run left tables behind
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        conn.execute(text(VIEW_SQL.read_text()))
     yield
+    with engine.begin() as conn:
+        conn.execute(text("DROP VIEW IF EXISTS drawer_coordinates"))
     Base.metadata.drop_all(bind=engine)
 
 
