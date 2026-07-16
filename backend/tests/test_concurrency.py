@@ -4,25 +4,35 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.main import app
-from app.database import get_db, SessionLocal
+from app.database import get_db
+from conftest import TestingSession
 
 
 def make_client():
     """
-    Create an isolated database session and test client for each thread.
-    Threads must not share sessions — SQLAlchemy sessions are not thread-safe.
-    """
-    session = SessionLocal()
+    Create an isolated test client whose DB dependency creates a brand new
+    session for every request it handles.
 
+    Why: the old version created ONE session up front and captured it in a
+    closure, then stored the override in app.dependency_overrides — a single
+    shared dict on the app object. When multiple threads called make_client()
+    around the same time (e.g. the 10-thread test below), the last thread to
+    run would overwrite the override entry set by the others, so an earlier
+    thread's request could end up running against a DIFFERENT thread's
+    session. Creating a fresh session inside the override function itself
+    means it doesn't matter which thread's override "wins" in the shared
+    dict — every version behaves identically (new session in, closed after).
+    """
     def override():
+        session = TestingSession()
         try:
             yield session
         finally:
-            pass
+            session.close()
 
     app.dependency_overrides[get_db] = override
-    client = TestClient(app, raise_server_exceptions=True)
-    return client, session
+    client = TestClient(app, raise_server_exceptions=False)
+    return client
 
 
 # ── Test 1: Concurrent suggests do not oversell capacity ─────────────────────
@@ -50,7 +60,7 @@ def test_concurrent_suggest_no_oversell(freezer):
     errors  = []
 
     def suggest():
-        client, session = make_client()
+        client = make_client()
         try:
             resp = client.post("/api/v1/containers/allocate-proximity/", json={
                 "number_of_containers": 5,
@@ -60,8 +70,6 @@ def test_concurrent_suggest_no_oversell(freezer):
             results.append(resp)
         except Exception as e:
             errors.append(e)
-        finally:
-            session.close()
 
     threads = [threading.Thread(target=suggest) for _ in range(10)]
     for t in threads: t.start()
@@ -110,8 +118,8 @@ def test_concurrent_confirm_same_drawer(freezer):
         stage. Even if both reservations passed the suggest-stage capacity
         check, only one commit lands in the database.
     """
-    client1, s1 = make_client()
-    client2, s2 = make_client()
+    client1 = make_client()
+    client2 = make_client()
 
     # Both users receive a reservation for the same freezer
     r1 = client1.post("/api/v1/containers/allocate-proximity/", json={
@@ -162,7 +170,6 @@ def test_concurrent_confirm_same_drawer(freezer):
     # Fire simultaneously
     t1.start(); t2.start()
     t1.join();  t2.join()
-    s1.close(); s2.close()
 
     print(f"\nConfirm status codes: {confirm_results}")
 
@@ -193,7 +200,7 @@ def test_expired_reservation_frees_space(freezer, db):
         browser, session timed out, network dropped — do not permanently lock
         drawer space. No manual intervention is required once the TTL expires.
     """
-    client, session = make_client()
+    client = make_client()
 
     # Occupy the drawer with a reservation
     resp = client.post("/api/v1/containers/allocate-proximity/", json={
@@ -224,8 +231,6 @@ def test_expired_reservation_frees_space(freezer, db):
         "Expired reservations must release space — the second suggest must succeed"
     )
 
-    session.close()
-
 
 # ── Test 4: Manual assignment respects active reservations ────────────────────
 
@@ -247,8 +252,8 @@ def test_manual_assignment_respects_reservations(freezer):
         the same capacity check. There is no bypass path — active reservations
         are always subtracted regardless of how a container is being introduced.
     """
-    client1, s1 = make_client()
-    client2, s2 = make_client()
+    client1 = make_client()
+    client2 = make_client()
 
     # User 1 reserves 4 out of 5 slots
     resp = client1.post("/api/v1/containers/allocate-proximity/", json={
@@ -274,5 +279,3 @@ def test_manual_assignment_respects_reservations(freezer):
         "Manual assignment must be blocked when active reservations leave "
         "insufficient effective capacity"
     )
-
-    s1.close(); s2.close()
