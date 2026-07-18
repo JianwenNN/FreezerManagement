@@ -1,16 +1,16 @@
 import { useState, useCallback } from 'react';
-import { listFreezersFn } from '../api';
+import { listFreezersFn, listFreezerDrawersFn } from '../api';
 
 /**
- * Builds a synthetic drawer grid from a freezer's dimension metadata.
- * Each drawer gets a coordinate, occupancy state, and reservation state.
+ * Builds a synthetic drawer grid from a freezer's dimension metadata,
+ * with real drawer_id values merged in from listFreezerDrawersFn().
  *
- * In a future iteration, the backend should expose a dedicated
- * GET /freezers/{id}/drawers endpoint that returns real occupancy.
- * Until then, reserved drawers come from the admin endpoint and
- * occupancy is unknown (shown as "unknown" / white).
+ * Occupancy itself is still unknown client-side (shown as "unknown" /
+ * white) — that remains a future enhancement. This function only fixes
+ * id resolution: every cell now carries the real `id` used for manual
+ * assignment, instead of relying on the synthetic drawerNum.
  */
-export function buildDrawerGrid(freezer, reservedDrawerIds = new Set()) {
+export function buildDrawerGrid(freezer, drawerIdLookup = {}, reservedDrawerIds = new Set()) {
   const layers = [];
   for (let l = 1; l <= freezer.num_of_layers; l++) {
     const racks = [];
@@ -18,7 +18,14 @@ export function buildDrawerGrid(freezer, reservedDrawerIds = new Set()) {
       const drawers = [];
       for (let d = 1; d <= freezer.num_of_drawer_per_rack; d++) {
         const coord = `${freezer.asset_id}-${l}-${r}-${d}`;
+        // Real database drawer_id, resolved from the backend via
+        // listFreezerDrawersFn(). Falls back to undefined if the lookup
+        // hasn't loaded yet — manual selection should be disabled/ignored
+        // until this is populated, since submitting without it means
+        // there is no real drawer_id to send.
+        const id = drawerIdLookup[`${l}-${r}-${d}`];
         drawers.push({
+          id,
           coord,
           layerNum:  l,
           rackNum:   r,
@@ -58,11 +65,25 @@ export function useFreezer() {
     }
   }, []);
 
-  const selectFreezer = useCallback((freezer) => {
+  const selectFreezer = useCallback(async (freezer) => {
     setSelectedFreezer(freezer);
-    // Build the grid from dimension metadata.
-    // Reserved drawer info would augment this in a future call.
-    const grid = buildDrawerGrid(freezer);
+    setError(null);
+
+    // Build a quick lookup of "layer-rack-drawer" -> real drawer_id so the
+    // grid (and anything submitted from it) uses actual database ids
+    // instead of the synthetic drawerNum (which repeats across racks).
+    let drawerIdLookup = {};
+    try {
+      const drawers = await listFreezerDrawersFn(freezer.asset_id);
+      drawerIdLookup = drawers.reduce((acc, d) => {
+        acc[`${d.layer_number}-${d.rack_number}-${d.drawer_number}`] = d.drawer_id;
+        return acc;
+      }, {});
+    } catch (e) {
+      setError('Failed to load drawer IDs for this freezer. Manual assignment will be unavailable until this succeeds.');
+    }
+
+    const grid = buildDrawerGrid(freezer, drawerIdLookup);
     setDrawerGrid(grid);
   }, []);
 

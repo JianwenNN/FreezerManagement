@@ -18,19 +18,15 @@ export const createFreezerFn = (payload) =>
   api.post('/freezers/', payload).then(r => r.data);
 
 // ── Drawer occupancy ─────────────────────────────────────────────────────────
-// Backend doesn't expose a single "drawer state" endpoint yet, so we derive
-// occupancy from the drawer_coordinates view via the admin endpoint and
-// supplement with available_space queries per drawer during allocation.
-// For now we return the freezer list (which has enough info to render the grid)
-// and fetch available space per drawer lazily when needed.
 
-export const getFreezerDrawersFn = (freezerAssetId) =>
-  // Returns all drawers belonging to the freezer via the admin reserved-drawers
-  // endpoint filtered client-side, plus a synthetic occupancy call.
-  // Replace with a dedicated /freezers/{id}/drawers endpoint when available.
-  api.get('/admin/reserved-drawers').then(r =>
-    r.data.filter(d => d.freezer_asset_id === freezerAssetId)
-  );
+export const listFreezerDrawersFn = (freezerAssetId) =>
+  // GET /freezers/{asset_id}/drawers
+  // Returns: [{ drawer_id, freezer_asset_id, layer_number, rack_number,
+  //             drawer_number, drawer_coordinate }]
+  // Used by useFreezer.js to resolve each grid cell's real drawer_id
+  // before manual assignment — drawerNum alone is NOT unique across
+  // racks and must never be sent to the backend as drawer_id.
+  api.get(`/freezers/${encodeURIComponent(freezerAssetId)}/drawers`).then(r => r.data);
 
 // ── Allocation (suggest) ────────────────────────────────────────────────────
 

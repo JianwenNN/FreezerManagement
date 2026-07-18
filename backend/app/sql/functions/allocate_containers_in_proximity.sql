@@ -19,6 +19,20 @@ DECLARE
     v_capacity         INTEGER;
     container_fit      INTEGER;
     allocated          INTEGER;
+    used_drawer_ids    INTEGER[] := ARRAY[]::INTEGER[];  -- drawers already
+                                                          -- consumed *within
+                                                          -- this call*. The
+                                                          -- DB itself doesn't
+                                                          -- reflect these yet
+                                                          -- (reservations are
+                                                          -- written by the
+                                                          -- caller AFTER this
+                                                          -- function returns),
+                                                          -- so we can't rely
+                                                          -- on available_space_
+                                                          -- in_drawer() alone
+                                                          -- to avoid re-picking
+                                                          -- the same drawer.
 BEGIN
     -- Resolve freezer integer id from asset_id
     SELECT id INTO current_freezer_id
@@ -62,6 +76,10 @@ BEGIN
         --   - partially filled       → returns remainder
         --   - empty drawers          → returns full capacity
         --
+        -- We additionally exclude any drawer_id already in used_drawer_ids,
+        -- since available_space_in_drawer() can't see allocations this same
+        -- function call has already decided on but not yet persisted.
+        --
         -- Only re-runs when current_rack_id is NULL (cleared by escalation).
         -- -------------------------------------------------------------------
         IF current_rack_id IS NULL THEN
@@ -72,6 +90,7 @@ BEGIN
             JOIN   layer l ON r.layer_id = l.id
             WHERE  l.freezer_id = current_freezer_id
               AND  d.reserved   = FALSE
+              AND  NOT (d.id = ANY(used_drawer_ids))
               AND  available_space_in_drawer(d.id, p_sample_type) > 0
             GROUP  BY r.id, r.layer_id
             ORDER  BY SUM(available_space_in_drawer(d.id, p_sample_type)) DESC
@@ -92,6 +111,7 @@ BEGIN
         FROM   drawer d
         WHERE  d.rack_id  = current_rack_id
           AND  d.reserved = FALSE
+          AND  NOT (d.id = ANY(used_drawer_ids))
           AND  available_space_in_drawer(d.id, p_sample_type) > 0
         ORDER  BY available_space_in_drawer(d.id, p_sample_type) DESC
         LIMIT  1;
@@ -114,6 +134,7 @@ BEGIN
             WHERE  r.layer_id = current_layer_id
               AND  r.id      != current_rack_id
               AND  d.reserved = FALSE
+              AND  NOT (d.id = ANY(used_drawer_ids))
               AND  available_space_in_drawer(d.id, p_sample_type) > 0
             GROUP  BY r.id
             ORDER  BY SUM(available_space_in_drawer(d.id, p_sample_type)) DESC
@@ -132,6 +153,7 @@ BEGIN
                            JOIN   rack r ON d.rack_id = r.id
                            WHERE  r.layer_id = l.id
                              AND  d.reserved  = FALSE
+                             AND  NOT (d.id = ANY(used_drawer_ids))
                              AND  available_space_in_drawer(d.id, p_sample_type) > 0
                        )
                 ORDER  BY l.layer_number
@@ -151,10 +173,13 @@ BEGIN
 
         -- -------------------------------------------------------------------
         -- Step 4: allocate — fill this drawer as much as possible, emit a
-        --         result row, and subtract from remaining.
+        --         result row, and subtract from remaining. Record the
+        --         drawer as used so it can never be selected again within
+        --         this same function call.
         -- -------------------------------------------------------------------
         allocated := LEAST(container_fit, remaining);
         remaining := remaining - allocated;
+        used_drawer_ids := array_append(used_drawer_ids, v_drawer_id);
 
         SELECT dc.drawer_coordinate INTO v_coord
         FROM   drawer_coordinates dc

@@ -10,8 +10,10 @@ from app.database import get_db
 from app import schemas
 from app.models import StudySampleContainer, STDQCContainer, DrawerReservation
 
-router = APIRouter()
+# import time
+# import threading
 
+router = APIRouter()
 RESERVATION_TTL_MINUTES = 5
 
 
@@ -184,7 +186,9 @@ def _acquire_drawer_lock(db: Session, drawer_id: int) -> None:
     Blocks any other transaction attempting the same lock until this
     transaction commits or rolls back — typically milliseconds.
     """
+    # print(f"[{threading.current_thread().name}] requesting lock on drawer {drawer_id} at {time.time():.4f}")
     db.execute(text("SELECT pg_advisory_xact_lock(:id)"), {"id": drawer_id})
+    # print(f"[{threading.current_thread().name}] ACQUIRED lock on drawer {drawer_id} at {time.time():.4f}")
 
 
 def _validate_drawer(db: Session, drawer_id: int) -> None:
@@ -227,6 +231,8 @@ def _check_capacity(
         text("SELECT available_space_in_drawer(:drawer_id, :sample_type)"),
         {"drawer_id": drawer_id, "sample_type": sample_type}
     ).scalar()
+
+    # print(f"[{threading.current_thread().name}] drawer {drawer_id} remaining_space={remaining_space}, need={containers_to_insert}")
 
     if containers_to_insert > remaining_space:
         detail = (
