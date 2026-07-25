@@ -55,6 +55,8 @@ jobs:
 
       - name: Run backend tests
         working-directory: backend
+        # python -m pytest (not bare `pytest`) adds the cwd to sys.path,
+        # which is what makes `from app.main import app` in conftest.py resolvable.
         run: python -m pytest -v
 
   frontend-build:
@@ -79,3 +81,45 @@ jobs:
         working-directory: frontend
         # TODO: if the build needs VITE_API_URL or similar at build time, add it here
         run: npm run build
+
+  push-to-ecr:
+    needs: [backend-test, frontend-build]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required for OIDC — lets this job request a token from AWS
+      contents: read
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push backend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        working-directory: backend
+        run: |
+          docker build -t $ECR_REGISTRY/freezer-backend:$IMAGE_TAG -t $ECR_REGISTRY/freezer-backend:latest .
+          docker push $ECR_REGISTRY/freezer-backend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/freezer-backend:latest
+
+      - name: Build and push frontend image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        working-directory: frontend
+        run: |
+          docker build -t $ECR_REGISTRY/freezer-frontend:$IMAGE_TAG -t $ECR_REGISTRY/freezer-frontend:latest .
+          docker push $ECR_REGISTRY/freezer-frontend:$IMAGE_TAG
+          docker push $ECR_REGISTRY/freezer-frontend:latest
