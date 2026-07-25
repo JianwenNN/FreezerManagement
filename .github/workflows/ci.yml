@@ -30,6 +30,8 @@ jobs:
 
     # Points alembic/env.py at the CI Postgres service instead of your local hardcoded
     # freezer_management DB. Same DB conftest.py already hardcodes tests against.
+    # Updating to test the cd pipeline
+    
     env:
       ALEMBIC_DATABASE_URL: postgresql://postgres:password@localhost:5432/freezer_test
 
