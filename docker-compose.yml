@@ -19,6 +19,11 @@ services:
     build: ./backend
     environment:
       DATABASE_URL: postgresql://postgres:password@db:5432/freezer_management
+      # Alembic's env.py checks this specific variable (added for CI) and
+      # falls back to a hardcoded 127.0.0.1 default if it's not set —
+      # which fails inside Docker, since 127.0.0.1 there means "this
+      # container itself," not the db service.
+      ALEMBIC_DATABASE_URL: postgresql://postgres:password@db:5432/freezer_management
     ports:
       - "8000:8000"
     depends_on:
@@ -27,15 +32,19 @@ services:
     command: >
       sh -c "alembic upgrade head &&
               uvicorn app.main:app --host 0.0.0.0 --port 8000"
-  
+
   frontend:
-    build: ./frontend
-    environment:
-      VITE_API_URL: http://localhost:8000/api/v1
+    build:
+      context: ./frontend
+      args:
+        # Baked into the compiled JS at build time — update this if your
+        # domain or backend port ever changes. Uses the domain, not an IP,
+        # so this survives EC2 IP changes as long as DNS points correctly.
+        VITE_API_URL: http://jianw-inventory.duckdns.org:8000/api/v1
     ports:
-      - "5173:5173"
+      - "80:80"
     depends_on:
       - backend
-    
+
 volumes:
-    pgdata:
+  pgdata:
