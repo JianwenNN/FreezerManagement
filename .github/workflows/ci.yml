@@ -120,7 +120,10 @@ jobs:
           IMAGE_TAG: ${{ github.sha }}
         working-directory: frontend
         run: |
-          docker build -t $ECR_REGISTRY/freezer-frontend:$IMAGE_TAG -t $ECR_REGISTRY/freezer-frontend:latest .
+          docker build \
+            --build-arg VITE_API_URL=http://jianw-inventory.duckdns.org:8000/api/v1 \
+            -t $ECR_REGISTRY/freezer-frontend:$IMAGE_TAG \
+            -t $ECR_REGISTRY/freezer-frontend:latest .
           docker push $ECR_REGISTRY/freezer-frontend:$IMAGE_TAG
           docker push $ECR_REGISTRY/freezer-frontend:latest
 
