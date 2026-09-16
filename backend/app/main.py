@@ -21,7 +21,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=["http://localhost:5173",
+                   "http://jianw-inventory.duckdns.org",
+                    "http://77.112.2.81",
+                    ],  # Vite dev server
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
