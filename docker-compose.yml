@@ -16,9 +16,14 @@ services:
       retries: 5
 
   backend:
-    build: ./backend
+    image: 927864662216.dkr.ecr.us-east-1.amazonaws.com/freezer-backend:latest
     environment:
       DATABASE_URL: postgresql://postgres:password@db:5432/freezer_management
+      # Alembic's env.py checks this specific variable (added for CI) and
+      # falls back to a hardcoded 127.0.0.1 default if it's not set —
+      # which fails inside Docker, since 127.0.0.1 there means "this
+      # container itself," not the db service.
+      ALEMBIC_DATABASE_URL: postgresql://postgres:password@db:5432/freezer_management
     ports:
       - "8000:8000"
     depends_on:
@@ -27,15 +32,13 @@ services:
     command: >
       sh -c "alembic upgrade head &&
               uvicorn app.main:app --host 0.0.0.0 --port 8000"
-  
+
   frontend:
-    build: ./frontend
-    environment:
-      VITE_API_URL: http://localhost:8000/api/v1
+    image: 927864662216.dkr.ecr.us-east-1.amazonaws.com/freezer-frontend:latest
     ports:
-      - "5173:5173"
+      - "80:80"
     depends_on:
       - backend
-    
+
 volumes:
-    pgdata:
+  pgdata:
